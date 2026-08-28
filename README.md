@@ -51,6 +51,46 @@ and `identity.capability.root_agent_capability_signer()` both raise by design.
 Configuring a public DID does not change that, and is not a step toward it that
 happens on its own.
 
+### How the signer will be wired, when it is
+
+One path, in `identity/wiring.py`, and nothing else:
+
+```
+ROOT_AGENT_DID (committed, public)
+  -> keystore path (local config; never auto-discovered)
+  -> load_encrypted_pem(path, passphrase)     encrypted PKCS#8 only, 0600 file, 0700 dir
+  -> assert_key_matches_did(handle, expected) fail closed on mismatch
+  -> CapabilitySigner(...)                    the only object a caller receives
+  -> sign_technocore_message / sign_technocore_note
+```
+
+Three properties hold that path shut and keep it narrow:
+
+* **`build_capability_signer(..., reviewed=True)` is closed by default.** The
+  keyword exists so wiring is a reviewed code change, not the consequence of
+  setting a config value. A test asserts no production module passes it.
+* **The identity is checked before a signer exists.** If the key in the file does
+  not derive `ROOT_AGENT_DID`, the call raises `DidMismatchError` and no signing
+  object is ever constructed. Fail closed, always -- the fix is to correct the
+  path, never to change the configured DID to match whatever key was found.
+* **The raw signer never leaves.** `CapabilitySigner` holds it in a closure,
+  exposes only the two Technocore verbs, and refuses raw bytes, untrusted
+  content, pickling and copying. There is no `sign(arbitrary_bytes)` surface for
+  orchestration, agents, policy, a provider router, room content, a shell, or
+  plugin code to obtain.
+
+**Keystore policy.** The expected location is `~/.flopoffice/keys/` -- outside
+any repository, directory `0700`, file `0600`, encrypted PKCS#8 with a passphrase
+of at least 12 characters. There is **no plaintext fallback** and **no
+auto-discovery**: nothing reads a path from the repository, the working
+directory, `~/Downloads`, `~/.flopoffice` or the environment on its own. Every
+keystore input arrives as an explicit argument, and the path is never printed by
+`doctor`.
+
+The whole path is exercised end to end in `tests/security/test_signer_wiring.py`
+against **throwaway keys generated inside the test process**, written to
+`tmp_path`, and deleted with an assertion that no `.pem` survives.
+
 **The first public Technocore signed message remains blocked** pending a separate
 review of signer wiring. `technocore.chat` is on a host denylist that no
 environment variable unlocks.

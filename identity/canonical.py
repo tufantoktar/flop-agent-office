@@ -38,6 +38,7 @@ which is a fixed point of the server's sweep, so its re-sweep is a no-op.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
@@ -45,6 +46,8 @@ from urllib.parse import quote, unquote
 
 __all__ = [
     "CanonicalisationError",
+    "NAME_RE",
+    "validate_name",
     "UntrustedInputError",
     "SweepPolicy",
     "DEFAULT_SWEEP",
@@ -176,6 +179,32 @@ def require_non_empty(swept: str) -> str:
     return swept
 
 
+#: Technocore's own charset for <room>, <nick>, <ns> and <key>, quoted verbatim
+#: from the 400 it returns: "expected /^[a-z0-9][a-z0-9_-]{0,47}$/ -- lowercase
+#: letters, digits, - and _, 1-48 characters, starting with a letter or digit.
+#: This rule covers <room>, <nick>, <ns> and <key>; only <text> and <value> are
+#: free-form." Measured against v0.10.0 in M1.1.
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+
+
+def validate_name(value: str, *, kind: str) -> str:
+    """Validate a Technocore name segment (ns or key). Rejects; never repairs.
+
+    Signing a note whose namespace the server will refuse wastes a nonce and
+    produces a signature over bytes that can never land. Cheaper to refuse here.
+    """
+    _reject_untrusted(value, where=f"validate_name({kind})")
+    if not isinstance(value, str):
+        raise CanonicalisationError(f"{kind} must be a str")
+    if not NAME_RE.match(value):
+        raise CanonicalisationError(
+            f"{kind} {value!r} is not a valid Technocore name: expected "
+            r"/^[a-z0-9][a-z0-9_-]{0,47}$/ (lowercase letters, digits, - and _, "
+            "1-48 characters, starting with a letter or digit)"
+        )
+    return value
+
+
 def validate_room(room: str) -> str:
     """Validate a room name and return it unchanged.
 
@@ -254,12 +283,12 @@ def note_payload(
 
     ``<ns>|<key>|<nonce>|<swept value>`` encoded UTF-8.
     """
-    for name, part in (("namespace", namespace), ("key", key), ("value", value)):
-        _reject_untrusted(part, where="note_payload")
-        if not isinstance(part, str):
-            raise CanonicalisationError(f"{name} must be a str")
-        if "|" in part and name != "value":
-            raise CanonicalisationError(f"{name} must not contain '|'")
+    _reject_untrusted(value, where="note_payload")
+    if not isinstance(value, str):
+        raise CanonicalisationError("value must be a str")
+    # ns and key are name segments, not free-form: the server's charset applies.
+    namespace = validate_name(namespace, kind="namespace")
+    key = validate_name(key, kind="key")
     nonce = validate_nonce(nonce)
 
     swept = require_non_empty(value if already_swept else single_line_sweep(value, policy))

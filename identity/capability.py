@@ -40,6 +40,7 @@ from .canonical import (
     note_payload,
     require_non_empty,
     single_line_sweep,
+    validate_name,
     validate_nonce,
     validate_room,
 )
@@ -105,10 +106,19 @@ class CapabilitySigner:
     something with a general ``sign(bytes)`` method.
     """
 
-    __slots__ = ("__signer", "__allow_notes")
+    __slots__ = ("__sign", "__did", "__allow_notes")
 
     def __init__(self, signer: Signer, *, allow_notes: bool = False) -> None:
-        object.__setattr__(self, "_CapabilitySigner__signer", signer)
+        # The wrapped signer is captured in a closure, not stored as an
+        # attribute. A `self.__signer` attribute is reachable through its
+        # mangled name (`obj._CapabilitySigner__signer`) by anyone who knows the
+        # trick; a closure at least requires walking __closure__ cells. Neither
+        # is a barrier against arbitrary in-process code -- Python cannot offer
+        # one -- but it removes the *accidental* path, which is the threat this
+        # class exists for: orchestration code that ends up holding a general
+        # sign(bytes) oracle without anybody deciding it should.
+        object.__setattr__(self, "_CapabilitySigner__sign", signer.sign)
+        object.__setattr__(self, "_CapabilitySigner__did", signer.did)
         # Note-signing is what claims and holds `d-` rooms and writes
         # /kv/room-owners. It is off unless a caller deliberately asks, so the
         # common case cannot reach it at all.
@@ -116,7 +126,7 @@ class CapabilitySigner:
 
     @property
     def did(self) -> DidKey:
-        return self.__signer.did
+        return self.__did
 
     @property
     def notes_allowed(self) -> bool:
@@ -139,7 +149,7 @@ class CapabilitySigner:
         payload = message_payload(room, nonce, swept, already_swept=True)
         return SignedMessage(
             did=str(self.did), room=room, nonce=nonce, swept_text=swept,
-            signature=self.__signer.sign(payload), payload=payload,
+            signature=self.__sign(payload), payload=payload,
         )
 
     def sign_technocore_note(
@@ -152,12 +162,14 @@ class CapabilitySigner:
                 "hold `d-` rooms, so it is granted deliberately or not at all"
             )
         self._guard(namespace, key, value)
+        namespace = validate_name(namespace, kind="namespace")
+        key = validate_name(key, kind="key")
         nonce = validate_nonce(nonce)
         swept = require_non_empty(single_line_sweep(value))
         payload = note_payload(namespace, key, nonce, swept, already_swept=True)
         return SignedNote(
             did=str(self.did), namespace=namespace, key=key, nonce=nonce,
-            swept_value=swept, signature=self.__signer.sign(payload), payload=payload,
+            swept_value=swept, signature=self.__sign(payload), payload=payload,
         )
 
     # --- guards ---------------------------------------------------------
@@ -168,13 +180,19 @@ class CapabilitySigner:
                 raise UntrustedInputError(
                     "refusing to sign untrusted, network-sourced content"
                 )
+            # Bytes first: the previous order made this branch unreachable, so a
+            # caller passing raw bytes got the generic "must be a string" message
+            # instead of the specific refusal this class is named for.
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                raise CapabilityError(
+                    "raw bytes cannot reach a capability signer: there is no "
+                    "sign(arbitrary_bytes) surface here by design"
+                )
             if not isinstance(value, str):
                 raise CapabilityError(
                     "capability arguments are strings built by this process, "
                     "never raw bytes and never wrapper types"
                 )
-            if isinstance(value, (bytes, bytearray)):  # pragma: no cover - defensive
-                raise CapabilityError("raw bytes cannot reach a capability signer")
 
     # --- leak prevention -------------------------------------------------
     def __repr__(self) -> str:
@@ -189,8 +207,17 @@ class CapabilitySigner:
     def __reduce__(self):
         raise CapabilityError("CapabilitySigner is not serialisable")
 
+    def __getstate__(self):
+        raise CapabilityError("CapabilitySigner is not serialisable")
+
+    def __copy__(self):
+        raise CapabilityError("CapabilitySigner must not be copied")
+
+    def __deepcopy__(self, memo):
+        raise CapabilityError("CapabilitySigner must not be copied")
+
     def __dir__(self):
-        return [n for n in super().__dir__() if "__signer" not in n]
+        return [n for n in super().__dir__() if "__sign" not in n]
 
 
 def root_agent_capability_signer() -> CapabilitySigner:

@@ -31,6 +31,9 @@ from .did import DidKey
 __all__ = [
     "KeystoreError",
     "KeyNotWiredError",
+    "KeystorePermissionError",
+    "DEFAULT_KEYSTORE_DIR",
+    "derive_did",
     "PrivateKeyHandle",
     "generate_ephemeral",
     "load_encrypted_pem",
@@ -42,6 +45,12 @@ __all__ = [
 REDACTED: Final = "<Ed25519PrivateKey redacted>"
 _MIN_PASSPHRASE_LEN: Final = 12
 
+#: Where a real keystore is expected to live: outside any repository, in the
+#: user's home, in a directory only they can read. Nothing auto-discovers it --
+#: this constant documents the policy and gives the future wiring step a default
+#: to validate against. It is never read at import.
+DEFAULT_KEYSTORE_DIR: Final = "~/.flopoffice/keys/"
+
 
 class KeystoreError(Exception):
     """Keystore failure. Never carries key material or file content."""
@@ -49,6 +58,10 @@ class KeystoreError(Exception):
 
 class KeyNotWiredError(KeystoreError):
     """A production signing path was requested that M1 deliberately does not provide."""
+
+
+class KeystorePermissionError(KeystoreError):
+    """The keystore file or its directory is readable by someone other than the owner."""
 
 
 class PrivateKeyHandle:
@@ -164,20 +177,42 @@ def load_encrypted_pem(path: Path | str, passphrase: str) -> PrivateKeyHandle:
     p = Path(path).expanduser()
     if not p.exists():
         raise KeystoreError(f"keystore not found: {p}")
+    if not p.is_file():
+        raise KeystoreError(f"keystore path is not a regular file: {p}")
     if not isinstance(passphrase, str) or len(passphrase) < _MIN_PASSPHRASE_LEN:
         raise KeystoreError(
             f"passphrase must be at least {_MIN_PASSPHRASE_LEN} characters"
         )
-    mode = p.stat().st_mode & 0o077
-    if mode:
-        raise KeystoreError(
+
+    if p.stat().st_mode & 0o077:
+        raise KeystorePermissionError(
             f"keystore {p} is group/world accessible; chmod 600 it before use"
         )
+    # The directory matters too: 0600 on the file is no protection if anyone can
+    # rename it, replace it, or drop a symlink in its place.
+    parent = p.parent
+    if parent.exists() and parent.stat().st_mode & 0o077:
+        raise KeystorePermissionError(
+            f"keystore directory {parent} is group/world accessible; "
+            f"chmod 700 it before use"
+        )
+
+    data = None
     try:
         data = p.read_bytes()
+        if b"ENCRYPTED" not in data and b"-----BEGIN OPENSSH" not in data:
+            # An unencrypted PKCS#8 PEM would load happily if we passed
+            # password=None. We never do: there is no plaintext fallback, and a
+            # key sitting in the clear is a finding, not an inconvenience.
+            raise KeystoreError(
+                f"keystore {p} does not look encrypted. This loader has no "
+                "plaintext fallback -- re-export the key with a passphrase."
+            )
         key = serialization.load_pem_private_key(
             data, password=passphrase.encode("utf-8")
         )
+    except KeystoreError:
+        raise
     except Exception:  # noqa: BLE001 - message is deliberately content-free
         raise KeystoreError(
             f"could not decrypt keystore at {p} (wrong passphrase or bad format)"
@@ -188,6 +223,16 @@ def load_encrypted_pem(path: Path | str, passphrase: str) -> PrivateKeyHandle:
     if not isinstance(key, Ed25519PrivateKey):
         raise KeystoreError("keystore does not contain an Ed25519 private key")
     return PrivateKeyHandle(key, label=p.name)
+
+
+def derive_did(handle: PrivateKeyHandle) -> DidKey:
+    """The did:key implied by a loaded private key.
+
+    Public output from private input, which is the whole point: it lets the
+    wiring step check that the key in the file is the key the project claims,
+    without anything private leaving the handle.
+    """
+    return handle.did
 
 
 def production_signer():

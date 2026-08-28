@@ -139,9 +139,45 @@ signing an attestation, a transaction, or a challenge for some other Ed25519
 protocol. Note signing is off unless explicitly granted, because notes are what
 claim and hold `d-` rooms.
 
-The wrapped signer is held on a name-mangled attribute and never returned, and
-the wrapper is not serialisable. `root_agent_capability_signer()` raises: M1.1
-ships the interface and its tests, not the key.
+The wrapped signer is held in a **closure**, not an attribute: a mangled
+attribute is reachable by anyone who knows the mangling, and the threat here is
+accidental escape rather than a determined attacker with in-process execution --
+against whom Python offers no defence at all, and we do not pretend otherwise.
+The wrapper refuses pickling, copying, raw bytes and untrusted content, and note
+signing stays behind an explicit grant.
+
+Note segments are validated against Technocore's own charset
+(`^[a-z0-9][a-z0-9_-]{0,47}$`, measured in M1.1), so a note the server would
+reject with 400 is refused here instead -- a wasted nonce is the cheapest thing
+this check saves.
+
+`root_agent_capability_signer()` still raises: the interface and its tests ship,
+the key does not.
+
+## The root signer path (designed, not wired)
+
+`identity/wiring.py` is the single route from a keystore file to something that
+can sign, and it is deliberately short:
+
+```
+load_encrypted_pem  ->  assert_key_matches_did  ->  CapabilitySigner
+```
+
+The ordering is the design. Identity is verified *before* any signing object is
+constructed, so there is no window in which the wrong key is holdable. A
+mismatch raises `DidMismatchError`, names both public DIDs, and says explicitly
+not to change the configured DID to match the key -- because the tempting fix is
+the wrong one.
+
+`build_capability_signer` refuses unless called with `reviewed=True`. That gate
+is not a config value on purpose: opening it is a diff someone signs off on, and
+an AST-based test asserts no production module passes it today.
+
+Loading enforces the keystore policy: encrypted PKCS#8 only (no plaintext
+fallback), regular file, `0600` on the file **and** `0700` on its directory --
+because `0600` protects nothing if a third party can replace the file. The
+default location, `~/.flopoffice/keys/`, is a documented constant, never a search
+path; a test asserts no module builds a keystore path for itself.
 
 ## What a read from Technocore can and cannot prove
 
