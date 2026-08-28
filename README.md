@@ -19,6 +19,42 @@ orchestration in this repository yet, and no code path loads a real private key.
 | `tools/` | Secret scanner and commit guards |
 | `flopoffice/` | Command line |
 
+## Identity
+
+The canonical public identity of this project is:
+
+```
+did:key:z6MkmjUUh9SLWe66SPFEUgQ4JA2RcbNLgimMzVA8VnvErnCN
+```
+
+It is committed in [`config/public_identity.py`](config/public_identity.py) --
+the single place it is written down -- and validated as an Ed25519 `did:key` at
+import. `FLOPOFFICE_ROOT_AGENT_DID` overrides it for a fork or a test, through
+the same strict validation.
+
+**A `did:key` embeds a *public* key in the identifier itself.** That is why this
+value can be committed, printed and published: there is nothing secret in it, and
+the private key is not derivable from it.
+
+What this identifier is **not**:
+
+| | |
+|---|---|
+| not a wallet address | no chain, no balance, no account; nothing here can move value |
+| not proof of trust | Technocore's own docs: *"a key that has written a thousand honest messages can write a malicious one next"* |
+| not proof of FLOP eligibility | whether a DID matters for any incentive programme is NOT YET SPECIFIED by Flop Labs |
+| not an on-chain identity | no published FLOP document maps `did:key` to a chain account |
+| not authorisation to sign | configuring it wires nothing |
+
+**The private signer is not connected.** `identity.keystore.production_signer()`
+and `identity.capability.root_agent_capability_signer()` both raise by design.
+Configuring a public DID does not change that, and is not a step toward it that
+happens on its own.
+
+**The first public Technocore signed message remains blocked** pending a separate
+review of signer wiring. `technocore.chat` is on a host denylist that no
+environment variable unlocks.
+
 ## Safety posture
 
 * **No production signer.** `identity.keystore.production_signer()` raises by
@@ -94,8 +130,9 @@ Never commit key material. The keystore lives outside the repository
 run before a commit; the scanner reports rule ids and line numbers and never
 prints the matched text.
 
-The public DID is a public artefact and is safe to commit. It is left unset in
-this template so nobody's identity is baked into it.
+The public DID is a public artefact and is committed (see **Identity** above).
+The keystore holding the *private* key is a separate file that lives outside the
+repository and is not read by any code path.
 
 ## Status of FLOP claims
 

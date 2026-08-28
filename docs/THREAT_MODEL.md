@@ -57,6 +57,9 @@ carries key material — only signatures.
 | T18 | A general `sign(bytes)` oracle reaching orchestration code | `identity/capability.py` exposes only `sign_technocore_message` / `sign_technocore_note`, builds the bytes internally from validated parts, refuses raw bytes and untrusted wrappers, and gates note signing behind an explicit grant. | Not yet the only path: `Signer.sign` still exists for the client and tests. Wiring the real key must go through the capability wrapper, not around it. |
 | T19 | Hygiene tooling silently excluding source from the repository | M1's `.gitignore` line `keystore*` excluded `identity/keystore.py` from the initial commit; local tests passed because the file was on disk. Fixed, and `tests/security` now fails if **any** source or doc file is gitignored, or if a package module cannot be tracked. | The class of bug -- a guard that over-matches -- is only covered for the file types the test globs. |
 
+| T20 | The public identity being mistaken for a credential | The DID is public by construction (it embeds a public key). It is committed, printed abbreviated by default, and documented in three places as not a wallet, not trust, not eligibility, not authorisation to sign. `config/settings.py` imports no key machinery, and a test asserts it. | Someone reading `ROOT_AGENT_DID` in config and assuming a signer exists. The doctor output says `NOT WIRED` twice for this reason. |
+| T21 | An environment override smuggling in an identity the code would refuse | The override goes through the same `DidKey` validator as the committed value; blank falls back rather than disabling identity; malformed fails closed with a message naming the variable. | An operator setting a *valid* DID they do not control. That is a deployment decision, not something config can detect. |
+
 ## Deferred — not covered by M1
 
 These belong to later milestones and are listed so nobody assumes coverage:

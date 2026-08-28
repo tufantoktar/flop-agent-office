@@ -108,6 +108,27 @@ a consistent chain. Adding external timestamping — publishing a chain head as 
 signed Technocore note, for instance — is a later milestone, and the CLI says so
 in its own output rather than letting a `VALID` line overstate itself.
 
+## The public identity
+
+`config/public_identity.py` holds `ROOT_AGENT_DID` and nothing else. It imports
+only `identity.did`, reads no files, and constructs the `DidKey` at import so a
+malformed edit fails immediately rather than at the first `load()`.
+
+`config/settings.py` resolves the identity as: environment override if set and
+non-blank, otherwise the committed value -- both through the same strict Ed25519
+validator, so an environment variable can change *which* identity but never
+*whether* it is checked. `Settings.root_agent_did` is therefore always present,
+and `root_agent_did_source` records which of the two it came from.
+
+Deliberately absent: any function that generates, derives or rotates a DID.
+Changing the project's identity is a reviewed commit to one line, not a runtime
+capability. A test asserts the canonical value appears in exactly one production
+module, and that no second identity appears in production source at all.
+
+Nothing on this path touches key material. `config/settings.py` does not import
+`identity.keystore`, `identity.signer` or `identity.capability`, and a test
+asserts that it never will.
+
 ## Capability-scoped signing
 
 `identity/capability.py` narrows a `Signer` to exactly two verbs --

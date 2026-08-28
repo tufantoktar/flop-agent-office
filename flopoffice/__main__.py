@@ -7,8 +7,9 @@ ledger-status   counts, head hash, and any dangling write intents
 scan-secrets    run the repository secret scanner over the working tree
 doctor          report configuration and the M1 safety posture
 
-No command in M1 performs a network write, touches a wallet, calls a FLOP
-endpoint, or loads a real private key.
+No command performs a network write, touches a wallet, calls a FLOP endpoint, or
+loads a private key. `doctor` prints the root agent's PUBLIC DID; there is no
+command that can print, derive or imply private key material.
 """
 
 from __future__ import annotations
@@ -91,7 +92,7 @@ def _cmd_scan_secrets(args: argparse.Namespace) -> int:
     return scan_main(["--root", args.root, "--all"])
 
 
-def _cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _cmd_doctor(args: argparse.Namespace) -> int:
     try:
         settings = load()
     except ConfigError as exc:
@@ -99,15 +100,25 @@ def _cmd_doctor(args: argparse.Namespace) -> int:  # noqa: ARG001
         return EXIT_ERROR
 
     did = settings.root_agent_did
-    print("flop-agent-office - M1 posture")
+    # Abbreviated by default. The full DID is public data -- it embeds a public
+    # key, not a secret -- but an abbreviation is what a status line wants, and
+    # `--full-did` is there for when the whole value is the thing you need.
+    shown = did.did if getattr(args, "full_did", False) else did.short
+
+    print("flop-agent-office - posture")
     print(f"  env:                 {settings.env}")
     print(f"  ledger:              {settings.ledger_path}")
-    print(f"  root agent DID:      {did.short if did else '<unset>'}")
-    print(f"  keystore configured: {'yes' if settings.keystore_path else 'no'} (never loaded in M1)")
+    print(f"  root agent DID:      {shown}  ({settings.root_agent_did_source})")
+    print(f"  keystore configured: {'yes' if settings.keystore_path else 'no'} (never loaded)")
     print(f"  technocore base url: {settings.technocore_base_url or '<unset>'}")
     print(f"  local writes:        {'enabled' if settings.allow_local_write else 'disabled'}")
     print()
+    print("  root agent DID is PUBLIC identity only:")
+    print("    not a wallet, not proof of trust, not proof of FLOP eligibility,")
+    print("    not an on-chain identity, and not authorisation to sign.")
+    print()
     print("  production signer:   NOT WIRED (by design)")
+    print("  capability signer:   NOT WIRED (by design)")
     print("  public technocore:   WRITES BLOCKED (host denylist)")
     print("  FLOP / faucet / wallet code: NONE")
     return EXIT_OK
@@ -130,6 +141,10 @@ def build_parser() -> argparse.ArgumentParser:
     scan.set_defaults(func=_cmd_scan_secrets)
 
     doctor = sub.add_parser("doctor", help="report configuration and safety posture")
+    doctor.add_argument(
+        "--full-did", action="store_true",
+        help="print the complete public root agent DID instead of an abbreviation",
+    )
     doctor.set_defaults(func=_cmd_doctor)
     return parser
 

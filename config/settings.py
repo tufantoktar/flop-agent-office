@@ -4,9 +4,10 @@ Public values only. This module reads paths, flags and the *public* DID. It
 never reads, holds or logs a passphrase, private key, seed phrase or API secret,
 and there is no setting that would make it do so.
 
-The root agent DID is a public artefact and is safe to commit -- but it is left
-unset by default so that nobody's identity is baked into a template repository.
-Set ``FLOPOFFICE_ROOT_AGENT_DID`` or write ``config/agent.yaml`` locally.
+The root agent DID is a public artefact and is committed, in exactly one place:
+``config/public_identity.py``. ``FLOPOFFICE_ROOT_AGENT_DID`` overrides it for a
+fork or a test, and the override goes through the same strict Ed25519 ``did:key``
+validation -- it changes which identity, never whether it is checked.
 """
 
 from __future__ import annotations
@@ -14,10 +15,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
+from config.public_identity import ENV_OVERRIDE, ROOT_AGENT
 from identity.did import DidKey, DidKeyError
 
-__all__ = ["Settings", "ConfigError", "load"]
+__all__ = ["Settings", "ConfigError", "load", "DidSource"]
+
+DidSource = Literal["committed", "environment"]
 
 FORBIDDEN_ENV_SUBSTRINGS = ("PRIVATE_KEY", "PASSPHRASE", "SEED", "MNEMONIC", "SECRET")
 
@@ -30,7 +35,9 @@ class ConfigError(Exception):
 class Settings:
     env: str
     ledger_path: Path
-    root_agent_did: DidKey | None
+    #: Always present: the committed identity, or a validated override.
+    root_agent_did: DidKey
+    root_agent_did_source: DidSource
     keystore_path: Path | None
     technocore_base_url: str | None
     allow_local_write: bool
@@ -65,13 +72,19 @@ def load(environ: dict[str, str] | None = None) -> Settings:
     if environ is None:
         _reject_secret_env()
 
-    did_text = (env_map.get("FLOPOFFICE_ROOT_AGENT_DID") or "").strip()
-    root_did: DidKey | None = None
-    if did_text:
+    override = (env_map.get(ENV_OVERRIDE) or "").strip()
+    if override:
         try:
-            root_did = DidKey(did_text)
+            root_did, did_source = DidKey(override), "environment"
         except DidKeyError as exc:
-            raise ConfigError(f"FLOPOFFICE_ROOT_AGENT_DID is not a valid Ed25519 did:key: {exc}") from None
+            # The override is validated exactly as strictly as the committed
+            # value. An environment variable may not smuggle in a DID the code
+            # would refuse if it were written down.
+            raise ConfigError(
+                f"{ENV_OVERRIDE} is not a valid Ed25519 did:key: {exc}"
+            ) from None
+    else:
+        root_did, did_source = ROOT_AGENT, "committed"
 
     keystore = env_map.get("FLOPOFFICE_KEYSTORE")
     keystore_path = Path(keystore).expanduser() if keystore else None
@@ -90,6 +103,7 @@ def load(environ: dict[str, str] | None = None) -> Settings:
         env=(env_map.get("FLOPOFFICE_ENV") or "dev").lower(),
         ledger_path=Path(env_map.get("FLOPOFFICE_LEDGER") or "flopoffice.sqlite"),
         root_agent_did=root_did,
+        root_agent_did_source=did_source,
         keystore_path=keystore_path,
         technocore_base_url=(env_map.get("TECHNOCORE_BASE_URL") or "").strip() or None,
         allow_local_write=env_map.get("FLOPOFFICE_ALLOW_LOCAL_WRITE") == "1",

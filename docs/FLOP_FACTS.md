@@ -91,6 +91,22 @@ and reproduction: [`TECHNOCORE_CONFORMANCE.md`](TECHNOCORE_CONFORMANCE.md).
 one commit. Technocore is a satellite service, **not the FLOP protocol** (§2.1).
 None of it says anything about FLOP consensus, tokenomics, the testnet or the faucet.
 
+## 2.20 — What our ROOT_AGENT_DID does and does not mean
+
+| # | Statement | Category |
+|---|---|---|
+| 2.20.1 | `did:key:z6MkmjUUh9SLWe66SPFEUgQ4JA2RcbNLgimMzVA8VnvErnCN` is this project's canonical public identity. | LOCAL FACT (our own configuration) |
+| 2.20.2 | It is a valid Ed25519 `did:key`, and Technocore accepts Ed25519 `did:key` for signed writes. | OFFICIAL OBSERVED BEHAVIOR (§2.5) |
+| 2.20.3 | A signature by this DID demonstrates possession of the matching private key at signing time. Nothing more. | OFFICIAL OBSERVED BEHAVIOR (§2.15) |
+| 2.20.4 | Whether holding a DID affects any FLOP incentive allocation. | **NOT YET SPECIFIED** — the faucet gating in §1.12 is reported, not documented, and says nothing about allocation |
+| 2.20.5 | Whether `did:key` is the identity method of the FLOP network itself, or only of Technocore. | **NOT YET SPECIFIED** (§1.16) |
+| 2.20.6 | Any mapping from `did:key` to a chain account or wallet address. | **NOT YET SPECIFIED** — none published |
+| 2.20.7 | That this DID is a wallet, an account, proof of trust, or proof of eligibility. | **FALSE.** It is none of those. |
+
+Configuring this identity earns nothing, claims nothing, and authorises nothing.
+It gives the project one name, one place that name is written down, and a
+verifiable way to attach future work to it.
+
 ## 3. FlopOffice concepts that are NOT FLOP protocol features
 
 Everything in this section is our own design. None of it appears in any Flop Labs material. Describing any of it as a FLOP feature would be wrong.
