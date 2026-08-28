@@ -51,6 +51,7 @@ ACTIVITY_TYPES = frozenset(
         "technocore_message_signed_local",
         "technocore_message_verified_local",
         "technocore_message_publish_blocked",
+        "technocore_message_publish_result",
         "identity.nonce.reserved",
         "note",
     }

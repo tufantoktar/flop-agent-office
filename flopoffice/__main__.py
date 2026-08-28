@@ -6,22 +6,37 @@ verify-ledger   walk the hash chain and report VALID / EMPTY / BROKEN
 ledger-status   counts, head hash, and any dangling write intents
 scan-secrets    run the repository secret scanner over the working tree
 doctor          report configuration and the M1 safety posture
+publish-technocore-announcement
+                one-time public publish of the reviewed announcement
 
 No command performs a network write, touches a wallet, calls a FLOP endpoint, or
-loads a private key. `doctor` prints the root agent's PUBLIC DID; there is no
-command that can print, derive or imply private key material.
+loads a private key except the explicitly confirmed public announcement publish
+command. `doctor` prints the root agent's PUBLIC DID; no command may print,
+derive or imply private key material.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
+import subprocess
 import sys
 from pathlib import Path
 
 from config.settings import ConfigError, load
+from identity.keystore import KeystoreError
+from identity.nonce import NonceStore
+from identity.wiring import DidMismatchError
 from proof.ledger import Ledger
 from proof.verify import Status, verify_chain
 from storage.db import connect
+from technocore.announcement import (
+    FIRST_ANNOUNCEMENT_ROOM,
+    FIRST_ANNOUNCEMENT_SHA256,
+    AnnouncementPreparationError,
+    publish_first_announcement_once,
+)
+from technocore.client import TechnocoreClient
 
 EXIT_OK = 0
 EXIT_BROKEN = 2
@@ -128,6 +143,89 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_publish_technocore_announcement(args: argparse.Namespace) -> int:
+    if not args.confirm_public_technocore_publish:
+        print("ERROR: exact public publish confirmation flag is required", file=sys.stderr)
+        return EXIT_ERROR
+    if args.room != FIRST_ANNOUNCEMENT_ROOM:
+        print("ERROR: room does not match the reviewed announcement", file=sys.stderr)
+        return EXIT_ERROR
+    if args.message_sha256 != FIRST_ANNOUNCEMENT_SHA256:
+        print("ERROR: message SHA-256 does not match the reviewed announcement",
+              file=sys.stderr)
+        return EXIT_ERROR
+    if args.base_url.rstrip("/") != "https://technocore.chat":
+        print("ERROR: base URL must be exactly https://technocore.chat", file=sys.stderr)
+        return EXIT_ERROR
+    if not _repo_is_clean():
+        print("ERROR: repository has uncommitted changes; refusing to publish",
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    try:
+        settings = load()
+    except ConfigError:
+        print("ERROR: public/path configuration is invalid", file=sys.stderr)
+        return EXIT_ERROR
+    if settings.keystore_path is None:
+        print("ERROR: explicit FLOPOFFICE_KEYSTORE configuration is required",
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    passphrase = None
+    conn = None
+    try:
+        from identity.capability import root_agent_capability_signer  # noqa: PLC0415
+
+        passphrase = getpass.getpass("Root key passphrase: ")
+        capability = root_agent_capability_signer(passphrase, enable=True)
+        ledger_path = Path(args.ledger) if args.ledger else settings.ledger_path
+        conn = connect(ledger_path)
+        with TechnocoreClient(args.base_url) as client:
+            result = publish_first_announcement_once(
+                capability,
+                Ledger(conn),
+                NonceStore(conn),
+                client,
+                room=args.room,
+                message_sha256=args.message_sha256,
+                confirm_public_technocore_publish=True,
+            )
+    except (AnnouncementPreparationError, ConfigError, DidMismatchError, KeystoreError):
+        print("ERROR: publish flow stopped fail-closed", file=sys.stderr)
+        return EXIT_ERROR
+    finally:
+        passphrase = None
+        if conn is not None:
+            conn.close()
+
+    print(f"root DID: {result.preparation.proof.did.removeprefix('did:key:')[:4]}..."
+          f"{result.preparation.proof.did[-4:]}")
+    print("message prepared: yes")
+    print("canonicalization: PASS")
+    print("signature verification: PASS")
+    print("ledger proof: recorded")
+    print("Technocore publish: SENT")
+    print(f"server seq: {result.server_seq}")
+    print("status: PUBLISHED")
+    return EXIT_OK
+
+
+def _repo_is_clean() -> bool:
+    root = Path(__file__).resolve().parents[1]
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0 and result.stdout.strip() == ""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="flopoffice", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -150,6 +248,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the complete public root agent DID instead of an abbreviation",
     )
     doctor.set_defaults(func=_cmd_doctor)
+
+    publish = sub.add_parser(
+        "publish-technocore-announcement",
+        help="publish the reviewed first Technocore announcement exactly once",
+    )
+    publish.add_argument("--base-url", required=True)
+    publish.add_argument("--room", required=True)
+    publish.add_argument("--message-sha256", required=True)
+    publish.add_argument("--ledger")
+    publish.add_argument("--confirm-public-technocore-publish", action="store_true")
+    publish.set_defaults(func=_cmd_publish_technocore_announcement)
     return parser
 
 

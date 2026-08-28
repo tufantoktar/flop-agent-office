@@ -17,18 +17,23 @@ from proof.verify import Status, verify_chain
 from technocore.announcement import (
     CANONICALIZATION_PROFILE,
     FIRST_ANNOUNCEMENT_ROOM,
+    FIRST_ANNOUNCEMENT_SHA256,
     FIRST_ANNOUNCEMENT_TEXT,
     NOT_SENT,
+    PUBLISHED,
     AnnouncementPreparationError,
     build_local_announcement_proof,
     prepare_first_announcement,
+    publish_first_announcement_once,
     reserve_announcement_nonce,
     verify_announcement_proof,
 )
 from technocore.client import (
+    OneTimePublicWriteGate,
     PUBLIC_HOSTS,
     PublicWriteRefused,
     TechnocoreClient,
+    TechnocoreError,
     build_signed_message,
 )
 
@@ -255,7 +260,260 @@ def test_settings_and_doctor_still_do_not_load_signer(monkeypatch, capsys) -> No
     assert "key never loaded by doctor" in capsys.readouterr().out
 
 
+def test_publish_requires_confirmation(conn, ledger, signer) -> None:
+    client = _mock_public_client(lambda request: {"ok": True, "seq": 1})
+    with pytest.raises(AnnouncementPreparationError, match="confirmation"):
+        publish_first_announcement_once(
+            _capability(signer),
+            ledger,
+            NonceStore(conn),
+            client,
+            room=FIRST_ANNOUNCEMENT_ROOM,
+            message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+        )
+
+
+def test_publish_blocks_wrong_message_hash(conn, ledger, signer) -> None:
+    client = _mock_public_client(lambda request: {"ok": True, "seq": 1})
+    with pytest.raises(AnnouncementPreparationError, match="SHA-256"):
+        publish_first_announcement_once(
+            _capability(signer),
+            ledger,
+            NonceStore(conn),
+            client,
+            room=FIRST_ANNOUNCEMENT_ROOM,
+            message_sha256="0" * 64,
+            confirm_public_technocore_publish=True,
+        )
+
+
+def test_publish_blocks_wrong_room(conn, ledger, signer) -> None:
+    client = _mock_public_client(lambda request: {"ok": True, "seq": 1})
+    with pytest.raises(AnnouncementPreparationError, match="room"):
+        publish_first_announcement_once(
+            _capability(signer),
+            ledger,
+            NonceStore(conn),
+            client,
+            room="e-p-flopoffice-test",
+            message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+            confirm_public_technocore_publish=True,
+        )
+
+
+def test_publish_blocks_local_verification_failure(monkeypatch, conn, ledger, signer) -> None:
+    import technocore.announcement as announcement  # noqa: PLC0415
+
+    monkeypatch.setattr(announcement, "verify_announcement_proof", lambda proof: False)
+    client = _mock_public_client(lambda request: {"ok": True, "seq": 1})
+    with pytest.raises(AnnouncementPreparationError, match="verification"):
+        publish_first_announcement_once(
+            _capability(signer),
+            ledger,
+            NonceStore(conn),
+            client,
+            room=FIRST_ANNOUNCEMENT_ROOM,
+            message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+            confirm_public_technocore_publish=True,
+        )
+
+
+def test_publish_records_pre_send_and_result_events(conn, ledger, signer) -> None:
+    seen_paths: list[str] = []
+    client = _mock_public_client(
+        lambda request: seen_paths.append(request.url.path) or {"ok": True, "seq": 42}
+    )
+    result = publish_first_announcement_once(
+        _capability(signer),
+        ledger,
+        NonceStore(conn),
+        client,
+        room=FIRST_ANNOUNCEMENT_ROOM,
+        message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+        confirm_public_technocore_publish=True,
+    )
+    rows = conn.execute(
+        "SELECT activity_type, tc_nonce, tc_seq FROM activities ORDER BY chain_index"
+    ).fetchall()
+    assert [row["activity_type"] for row in rows] == [
+        "technocore_message_prepare_intent",
+        "technocore_message_signed_local",
+        "technocore_message_verified_local",
+        "technocore_message_publish_blocked",
+        "technocore_message_publish_result",
+    ]
+    assert len(seen_paths) == 1
+    assert result.server_seq == 42
+    assert rows[-1]["tc_seq"] == 42
+    assert {row["tc_nonce"] for row in rows} == {result.preparation.proof.nonce}
+    meta = _meta(conn, result.publish_record.activity_id)
+    assert meta["publish_status"] == PUBLISHED
+    assert meta["sent_once"] is True
+    assert verify_chain(conn).status is Status.VALID
+
+
+def test_publish_reserves_one_nonce_only(conn, ledger, signer) -> None:
+    nonces = NonceStore(conn)
+    client = _mock_public_client(lambda request: {"ok": True, "seq": 1})
+    result = publish_first_announcement_once(
+        _capability(signer),
+        ledger,
+        nonces,
+        client,
+        room=FIRST_ANNOUNCEMENT_ROOM,
+        message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+        confirm_public_technocore_publish=True,
+    )
+    assert nonces.current(str(signer.did), scope_for_room(FIRST_ANNOUNCEMENT_ROOM)) == (
+        result.preparation.proof.nonce
+    )
+
+
+def test_one_time_gate_allows_one_send_and_then_closes(signer) -> None:
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return {"ok": True, "seq": calls}
+
+    client = _mock_public_client(handler)
+    write = build_signed_message(signer, FIRST_ANNOUNCEMENT_ROOM, 7, FIRST_ANNOUNCEMENT_TEXT)
+    gate = OneTimePublicWriteGate(
+        host="technocore.chat",
+        room=FIRST_ANNOUNCEMENT_ROOM,
+        message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+        nonce=7,
+        confirm_public_technocore_publish=True,
+    )
+    assert client.send_signed_message(write, public_gate=gate)["seq"] == 1
+    assert gate.used is True
+    assert gate.closed is True
+    with pytest.raises(PublicWriteRefused, match="closed"):
+        client.send_signed_message(write, public_gate=gate)
+    assert calls == 1
+
+
+def test_gate_closes_after_send_exception(signer) -> None:
+    def handler(request):  # noqa: ARG001
+        raise httpx.ConnectError("boom")
+
+    client = _mock_public_client(handler)
+    write = build_signed_message(signer, FIRST_ANNOUNCEMENT_ROOM, 8, FIRST_ANNOUNCEMENT_TEXT)
+    gate = OneTimePublicWriteGate(
+        host="technocore.chat",
+        room=FIRST_ANNOUNCEMENT_ROOM,
+        message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+        nonce=8,
+        confirm_public_technocore_publish=True,
+    )
+    with pytest.raises(TechnocoreError):
+        client.send_signed_message(write, public_gate=gate)
+    assert gate.used is True
+    assert gate.closed is True
+
+
+def test_public_writes_still_blocked_outside_gate(signer) -> None:
+    client = _mock_public_client(lambda request: pytest.fail("request reached transport"))
+    with pytest.raises(PublicWriteRefused, match="blocked in M1"):
+        client.send_signed_message(
+            build_signed_message(signer, FIRST_ANNOUNCEMENT_ROOM, 1, "blocked")
+        )
+
+
+def test_gate_scope_rejects_room_hash_and_nonce_mismatch(signer) -> None:
+    write = build_signed_message(signer, FIRST_ANNOUNCEMENT_ROOM, 9, FIRST_ANNOUNCEMENT_TEXT)
+    client = _mock_public_client(lambda request: pytest.fail("request reached transport"))
+
+    bad_room = OneTimePublicWriteGate(
+        host="technocore.chat",
+        room="e-p-flopoffice-test",
+        message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+        nonce=9,
+        confirm_public_technocore_publish=True,
+    )
+    with pytest.raises(PublicWriteRefused, match="room mismatch"):
+        client.send_signed_message(write, public_gate=bad_room)
+
+    bad_hash = OneTimePublicWriteGate(
+        host="technocore.chat",
+        room=FIRST_ANNOUNCEMENT_ROOM,
+        message_sha256="0" * 64,
+        nonce=9,
+        confirm_public_technocore_publish=True,
+    )
+    with pytest.raises(PublicWriteRefused, match="message mismatch"):
+        client.send_signed_message(write, public_gate=bad_hash)
+
+    bad_nonce = OneTimePublicWriteGate(
+        host="technocore.chat",
+        room=FIRST_ANNOUNCEMENT_ROOM,
+        message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+        nonce=10,
+        confirm_public_technocore_publish=True,
+    )
+    with pytest.raises(PublicWriteRefused, match="nonce mismatch"):
+        client.send_signed_message(write, public_gate=bad_nonce)
+
+
+def test_unexpected_publish_response_is_recorded_and_stops(conn, ledger, signer) -> None:
+    client = _mock_public_client(lambda request: {"ok": True})
+    with pytest.raises(AnnouncementPreparationError, match="unexpected"):
+        publish_first_announcement_once(
+            _capability(signer),
+            ledger,
+            NonceStore(conn),
+            client,
+            room=FIRST_ANNOUNCEMENT_ROOM,
+            message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+            confirm_public_technocore_publish=True,
+        )
+    row = conn.execute(
+        "SELECT activity_type, meta_json FROM activities ORDER BY chain_index DESC LIMIT 1"
+    ).fetchone()
+    assert row["activity_type"] == "technocore_message_publish_result"
+    assert json.loads(row["meta_json"])["publish_status"] == "UNEXPECTED_RESPONSE"
+
+
+def test_http_ambiguity_is_recorded_without_retry(conn, ledger, signer) -> None:
+    calls = 0
+
+    def handler(request):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("unclear")
+
+    client = _mock_public_client(handler)
+    with pytest.raises(AnnouncementPreparationError, match="no retry"):
+        publish_first_announcement_once(
+            _capability(signer),
+            ledger,
+            NonceStore(conn),
+            client,
+            room=FIRST_ANNOUNCEMENT_ROOM,
+            message_sha256=FIRST_ANNOUNCEMENT_SHA256,
+            confirm_public_technocore_publish=True,
+        )
+    assert calls == 1
+    row = conn.execute(
+        "SELECT activity_type, meta_json FROM activities ORDER BY chain_index DESC LIMIT 1"
+    ).fetchone()
+    assert row["activity_type"] == "technocore_message_publish_result"
+    assert json.loads(row["meta_json"])["publish_status"] == "AMBIGUOUS_OR_FAILED"
+
+
 def _sha256_bytes(payload: bytes) -> str:
     import hashlib
 
     return hashlib.sha256(payload).hexdigest()
+
+
+def _mock_public_client(handler):
+    def transport_handler(request):
+        response = handler(request)
+        return httpx.Response(200, json=response)
+
+    return TechnocoreClient(
+        "https://technocore.chat",
+        client=httpx.Client(transport=httpx.MockTransport(transport_handler)),
+    )

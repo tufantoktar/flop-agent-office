@@ -5,9 +5,17 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import httpx
+import pytest
+
+from identity.capability import CapabilitySigner
+from identity.signer import EphemeralSigner
+from identity.wiring import DidMismatchError
 from flopoffice.__main__ import main
 from proof.ledger import Activity, Ledger
 from storage.db import connect
+from technocore.announcement import FIRST_ANNOUNCEMENT_SHA256
+from technocore.client import TechnocoreClient
 
 DID = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
 
@@ -114,7 +122,137 @@ def test_config_rejects_repo_keystore_independent_of_cwd(
 def test_config_rejects_an_invalid_did() -> None:
     from config.settings import ConfigError, load  # noqa: PLC0415
 
-    import pytest  # noqa: PLC0415
-
     with pytest.raises(ConfigError, match="did:key"):
         load({"FLOPOFFICE_ROOT_AGENT_DID": "did:key:zNotReal"})
+
+
+def test_publish_announcement_requires_confirmation(capsys) -> None:
+    assert main([
+        "publish-technocore-announcement",
+        "--base-url", "https://technocore.chat",
+        "--room", "lobby",
+        "--message-sha256", FIRST_ANNOUNCEMENT_SHA256,
+    ]) == 3
+    assert "confirmation" in capsys.readouterr().err
+
+
+def test_publish_announcement_blocks_wrong_hash(capsys) -> None:
+    assert main([
+        "publish-technocore-announcement",
+        "--base-url", "https://technocore.chat",
+        "--room", "lobby",
+        "--message-sha256", "0" * 64,
+        "--confirm-public-technocore-publish",
+    ]) == 3
+    assert "SHA-256" in capsys.readouterr().err
+
+
+def test_publish_announcement_blocks_wrong_room(capsys) -> None:
+    assert main([
+        "publish-technocore-announcement",
+        "--base-url", "https://technocore.chat",
+        "--room", "e-p-flopoffice-test",
+        "--message-sha256", FIRST_ANNOUNCEMENT_SHA256,
+        "--confirm-public-technocore-publish",
+    ]) == 3
+    assert "room" in capsys.readouterr().err
+
+
+def test_publish_announcement_requires_configured_keystore(
+    monkeypatch, capsys
+) -> None:
+    import flopoffice.__main__ as cli  # noqa: PLC0415
+
+    monkeypatch.setattr(cli, "_repo_is_clean", lambda: True)
+    monkeypatch.delenv("FLOPOFFICE_KEYSTORE", raising=False)
+    assert main([
+        "publish-technocore-announcement",
+        "--base-url", "https://technocore.chat",
+        "--room", "lobby",
+        "--message-sha256", FIRST_ANNOUNCEMENT_SHA256,
+        "--confirm-public-technocore-publish",
+    ]) == 3
+    captured = capsys.readouterr()
+    assert "FLOPOFFICE_KEYSTORE" in captured.err
+    assert ".pem" not in captured.out + captured.err
+
+
+def test_publish_announcement_prompts_safely_and_prints_no_secrets(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    import flopoffice.__main__ as cli  # noqa: PLC0415
+    import identity.capability as capability_module  # noqa: PLC0415
+
+    hidden = "runtime input stays hidden"
+    monkeypatch.setattr(cli, "_repo_is_clean", lambda: True)
+    monkeypatch.setenv("FLOPOFFICE_KEYSTORE", str(tmp_path / "configured.pem"))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: hidden)
+    monkeypatch.setattr(
+        capability_module,
+        "root_agent_capability_signer",
+        lambda passphrase, *, enable: CapabilitySigner(EphemeralSigner()),
+    )
+
+    class ClientFactory:
+        def __init__(self, base_url: str) -> None:
+            self._client = TechnocoreClient(
+                base_url,
+                client=httpx.Client(
+                    transport=httpx.MockTransport(
+                        lambda request: httpx.Response(200, json={"ok": True, "seq": 1})
+                    )
+                ),
+            )
+
+        def __enter__(self):
+            return self._client
+
+        def __exit__(self, *exc: object) -> None:
+            self._client.close()
+
+    monkeypatch.setattr(cli, "TechnocoreClient", ClientFactory)
+
+    assert main([
+        "publish-technocore-announcement",
+        "--base-url", "https://technocore.chat",
+        "--room", "lobby",
+        "--message-sha256", FIRST_ANNOUNCEMENT_SHA256,
+        "--ledger", str(tmp_path / "ledger.sqlite"),
+        "--confirm-public-technocore-publish",
+    ]) == 0
+    combined = capsys.readouterr().out
+    assert "Technocore publish: SENT" in combined
+    assert hidden not in combined
+    assert str(tmp_path) not in combined
+    assert ".pem" not in combined
+
+
+def test_publish_announcement_stops_on_did_mismatch(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    import flopoffice.__main__ as cli  # noqa: PLC0415
+    import identity.capability as capability_module  # noqa: PLC0415
+
+    hidden = "runtime input stays hidden"
+    monkeypatch.setattr(cli, "_repo_is_clean", lambda: True)
+    monkeypatch.setenv("FLOPOFFICE_KEYSTORE", str(tmp_path / "configured.pem"))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: hidden)
+
+    def mismatch(passphrase, *, enable):  # noqa: ANN001, ARG001
+        raise DidMismatchError("public DIDs only, no private data")
+
+    monkeypatch.setattr(capability_module, "root_agent_capability_signer", mismatch)
+
+    assert main([
+        "publish-technocore-announcement",
+        "--base-url", "https://technocore.chat",
+        "--room", "lobby",
+        "--message-sha256", FIRST_ANNOUNCEMENT_SHA256,
+        "--ledger", str(tmp_path / "ledger.sqlite"),
+        "--confirm-public-technocore-publish",
+    ]) == 3
+    captured = capsys.readouterr()
+    combined = captured.out + captured.err
+    assert hidden not in combined
+    assert str(tmp_path) not in combined
+    assert ".pem" not in combined

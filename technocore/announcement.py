@@ -7,26 +7,37 @@ records append-only proof. It does not publish and does not hold a raw signer.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final, Mapping
 
 from identity.canonical import message_payload, single_line_sweep, validate_nonce
 from identity.capability import CapabilitySigner
 from identity.nonce import NonceStore, scope_for_room
 from identity.verifier import verify_message
 from proof.ledger import Activity, Ledger, LedgerRecord
+from technocore.client import (
+    OneTimePublicWriteGate,
+    SignedWrite,
+    TechnocoreClient,
+    TechnocoreError,
+)
 
 __all__ = [
     "CANONICALIZATION_PROFILE",
     "FIRST_ANNOUNCEMENT_ROOM",
+    "FIRST_ANNOUNCEMENT_SHA256",
     "FIRST_ANNOUNCEMENT_TEXT",
     "NOT_SENT",
+    "PUBLISHED",
     "AnnouncementPreparation",
     "AnnouncementProof",
     "AnnouncementProofRecords",
+    "AnnouncementPublishResult",
     "AnnouncementPreparationError",
     "build_local_announcement_proof",
     "prepare_first_announcement",
+    "publish_first_announcement_once",
     "record_local_announcement_proof",
     "reserve_announcement_nonce",
     "verify_announcement_proof",
@@ -43,7 +54,11 @@ FIRST_ANNOUNCEMENT_TEXT: Final = (
     "are available."
 )
 CANONICALIZATION_PROFILE: Final = "technocore-chat-v0.10.0-single-line-sweep"
+FIRST_ANNOUNCEMENT_SHA256: Final = (
+    "bb1cdabce2383285dc883d7f3792ec9503e6be56645bd283aeb940b82b79b7f0"
+)
 NOT_SENT: Final = "NOT_SENT"
+PUBLISHED: Final = "PUBLISHED"
 AWAITING_APPROVAL: Final = "awaiting_explicit_user_approval"
 
 
@@ -80,6 +95,14 @@ class AnnouncementProofRecords:
 class AnnouncementPreparation:
     proof: AnnouncementProof
     records: AnnouncementProofRecords
+
+
+@dataclass(frozen=True, slots=True)
+class AnnouncementPublishResult:
+    preparation: AnnouncementPreparation
+    publish_record: LedgerRecord
+    response_hash: str
+    server_seq: int | None
 
 
 def reserve_announcement_nonce(
@@ -259,5 +282,144 @@ def prepare_first_announcement(
     return AnnouncementPreparation(proof=proof, records=records)
 
 
+def publish_first_announcement_once(
+    capability: CapabilitySigner,
+    ledger: Ledger,
+    nonces: NonceStore,
+    client: TechnocoreClient,
+    *,
+    room: str,
+    message_sha256: str,
+    confirm_public_technocore_publish: bool = False,
+) -> AnnouncementPublishResult:
+    """Prepare proof, open a one-use gate, send once, and record the result."""
+    if not confirm_public_technocore_publish:
+        raise AnnouncementPreparationError("public publish confirmation is required")
+    if room != FIRST_ANNOUNCEMENT_ROOM:
+        raise AnnouncementPreparationError("room must be the prepared announcement room")
+    if message_sha256 != FIRST_ANNOUNCEMENT_SHA256:
+        raise AnnouncementPreparationError("message SHA-256 does not match announcement")
+
+    preparation = prepare_first_announcement(
+        capability,
+        ledger,
+        nonces,
+        room=room,
+        text=FIRST_ANNOUNCEMENT_TEXT,
+    )
+    proof = preparation.proof
+    if proof.canonical_text_hash != message_sha256:
+        raise AnnouncementPreparationError("canonicalization hash mismatch")
+    if not proof.verified or not verify_announcement_proof(proof):
+        raise AnnouncementPreparationError("local signature verification failed")
+
+    payload = message_payload(proof.room, proof.nonce, proof.canonical_text,
+                              already_swept=True)
+    write = SignedWrite(
+        did=proof.did,
+        room=proof.room,
+        nonce=proof.nonce,
+        text=proof.original_text,
+        swept_text=proof.canonical_text,
+        signature=proof.signature,
+        payload=payload,
+    )
+    if not write.verifies():
+        raise AnnouncementPreparationError("prepared signed write failed verification")
+
+    gate = OneTimePublicWriteGate(
+        host=client.host,
+        room=proof.room,
+        message_sha256=message_sha256,
+        nonce=proof.nonce,
+        confirm_public_technocore_publish=True,
+    )
+    try:
+        response = client.send_signed_message(write, public_gate=gate)
+    except TechnocoreError as exc:
+        _record_publish_result(
+            ledger,
+            preparation,
+            delivered=False,
+            status="AMBIGUOUS_OR_FAILED",
+            error=type(exc).__name__,
+        )
+        raise AnnouncementPreparationError(
+            "Technocore publish did not complete cleanly; no retry was attempted"
+        ) from None
+
+    response_hash = _response_hash(response)
+    ok = response.get("ok") if isinstance(response, Mapping) else None
+    seq = response.get("seq") if isinstance(response, Mapping) else None
+    if ok is not True or not isinstance(seq, int):
+        _record_publish_result(
+            ledger,
+            preparation,
+            delivered=False,
+            status="UNEXPECTED_RESPONSE",
+            response_hash=response_hash,
+        )
+        raise AnnouncementPreparationError("unexpected Technocore publish response")
+
+    record = _record_publish_result(
+        ledger,
+        preparation,
+        delivered=True,
+        status=PUBLISHED,
+        response_hash=response_hash,
+        server_seq=seq,
+    )
+    return AnnouncementPublishResult(preparation, record, response_hash, seq)
+
+
+def _record_publish_result(
+    ledger: Ledger,
+    preparation: AnnouncementPreparation,
+    *,
+    delivered: bool,
+    status: str,
+    response_hash: str | None = None,
+    server_seq: int | None = None,
+    error: str | None = None,
+) -> LedgerRecord:
+    proof = preparation.proof
+    meta: dict[str, Any] = {
+        "canonical_text_hash": proof.canonical_text_hash,
+        "message_sha256": FIRST_ANNOUNCEMENT_SHA256,
+        "publish_status": status,
+        "sent_once": delivered,
+        "stage": "publish_result",
+    }
+    if response_hash is not None:
+        meta["server_response_hash"] = response_hash
+    if error is not None:
+        meta["error"] = error
+    return ledger.append(
+        Activity(
+            agent_did=proof.did,
+            activity_type="technocore_message_publish_result",
+            ref_activity_id=preparation.records.publish_blocked.activity_id,
+            tc_room=proof.room,
+            tc_seq=server_seq,
+            tc_nonce=proof.nonce,
+            signed_payload_hash=proof.payload_hash,
+            signature=proof.signature,
+            result_hash=response_hash,
+            meta=meta,
+        )
+    )
+
+
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _response_hash(response: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        response,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

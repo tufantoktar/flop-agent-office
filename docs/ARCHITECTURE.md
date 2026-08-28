@@ -244,6 +244,25 @@ signer objects. Because Technocore reads do not return signatures, this local
 record is the durable material that can later prove the signature existed and
 verified; it is not evidence that a public message was published.
 
+M1.7 adds the one reviewed public publish path for that prepared message:
+
+```
+python -m flopoffice publish-technocore-announcement \
+  --base-url https://technocore.chat \
+  --room lobby \
+  --message-sha256 bb1cdabce2383285dc883d7f3792ec9503e6be56645bd283aeb940b82b79b7f0 \
+  --confirm-public-technocore-publish
+```
+
+The command checks the exact confirmation flag, exact room, exact message hash,
+clean working tree and explicit keystore configuration before it prompts via
+`getpass`. It then constructs the root `CapabilitySigner`, reserves one durable
+nonce, records the local pre-send proof, opens a `OneTimePublicWriteGate` scoped
+to the client host, room, canonical message hash and nonce, and calls
+`send_signed_message` once. The gate is consumed before the HTTP request and
+closed in `finally`, so it cannot be reused for a retry. The default
+`TechnocoreClient` path still refuses public hosts when no gate is supplied.
+
 ## What a read from Technocore can and cannot prove
 
 A room read returns no signature (measured, v0.10.0), so `verified` on an

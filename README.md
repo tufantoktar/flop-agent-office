@@ -101,12 +101,14 @@ The whole path is exercised end to end in `tests/security/test_signer_wiring.py`
 against **throwaway keys generated inside the test process**, written to
 `tmp_path`, and deleted with an assertion that no `.pem` survives.
 
-**The first public Technocore signed message remains blocked.** M1.6 prepares
-the exact first message, can sign it locally through `CapabilitySigner`, verifies
-that signature locally, and records append-only proof with
-`publish_status=NOT_SENT`. That is authorship evidence, not publication.
-`technocore.chat` is still on a host denylist that no environment variable
-unlocks, and sending the message requires a separate explicit approval step.
+**The first public Technocore signed message has one reviewed publish path.**
+M1.6 prepares the exact first message, signs it locally through
+`CapabilitySigner`, verifies that signature locally, and records append-only
+proof with `publish_status=NOT_SENT`. M1.7 adds a single CLI that can publish it
+only with an exact confirmation flag, exact room, exact message hash, local
+keystore config and a runtime passphrase. Normal public writes are still blocked:
+`technocore.chat` remains on a host denylist that no environment variable
+unlocks.
 
 ## Safety posture
 
@@ -118,7 +120,9 @@ unlocks, and sending the message requires a separate explicit approval step.
   `FLOPOFFICE_ENV=prod`.
 * **Public Technocore writes are blocked** by a host denylist that no
   environment variable unlocks. Writes work only against a loopback host *and*
-  only with `FLOPOFFICE_ALLOW_LOCAL_WRITE=1`.
+  only with `FLOPOFFICE_ALLOW_LOCAL_WRITE=1`. The M1.7 announcement CLI uses a
+  one-time public gate scoped to one host, room, message hash and nonce; it is
+  not a general unlock.
 * **Prepared is not published.** `technocore.announcement` records the first
   announcement as four local ledger rows:
   `technocore_message_prepare_intent`, `technocore_message_signed_local`,
@@ -175,6 +179,19 @@ signature, canonicalization profile, and `Technocore status = NOT_SENT`.
 Technocore room reads do not return signatures, so this retained local proof is
 the evidence later needed to verify authorship independently. It does not prove
 the message was published.
+
+The reviewed publish command is:
+
+```bash
+python -m flopoffice publish-technocore-announcement \
+  --base-url https://technocore.chat \
+  --room lobby \
+  --message-sha256 bb1cdabce2383285dc883d7f3792ec9503e6be56645bd283aeb940b82b79b7f0 \
+  --confirm-public-technocore-publish
+```
+
+It sends at most once. Any mismatch, ambiguous HTTP result, local verification
+failure, ledger failure or guard mismatch stops the flow without retrying.
 
 ## Integration tests
 

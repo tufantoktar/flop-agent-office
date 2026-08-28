@@ -18,9 +18,10 @@ to construct them.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
@@ -44,6 +45,7 @@ __all__ = [
     "PublicWriteRefused",
     "TechnocoreClient",
     "SignedWrite",
+    "OneTimePublicWriteGate",
     "build_signed_message",
     "PUBLIC_HOSTS",
 ]
@@ -65,6 +67,66 @@ class TechnocoreError(Exception):
 
 class PublicWriteRefused(TechnocoreError):
     """A write was attempted against a non-local host. Always refused in M1."""
+
+
+@dataclass(slots=True)
+class OneTimePublicWriteGate:
+    """A scoped, one-use exception to the public host denylist.
+
+    The denylist remains the default. This object is explicit, bound to one
+    public host, room, canonical message hash and nonce, and it is consumed
+    before the HTTP request is made. It cannot be reused for retries.
+    """
+
+    host: str
+    room: str
+    message_sha256: str
+    nonce: int
+    confirm_public_technocore_publish: bool = False
+    _used: bool = field(default=False, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.host = self.host.lower()
+        self.room = validate_room(self.room)
+        self.nonce = validate_nonce(self.nonce)
+        if not self.confirm_public_technocore_publish:
+            raise PublicWriteRefused("public Technocore publish gate lacks confirmation")
+        if self.host not in PUBLIC_HOSTS:
+            raise PublicWriteRefused(
+                "one-time public publish gate is only valid for the public denylist"
+            )
+        if not _is_sha256(self.message_sha256):
+            raise PublicWriteRefused("message_sha256 must be a 64-character hex digest")
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def used(self) -> bool:
+        return self._used
+
+    def consume(self, *, host: str, write: SignedWrite) -> None:
+        if self._closed or self._used:
+            raise PublicWriteRefused("one-time public publish gate is already closed")
+        if host.lower() != self.host:
+            self.close()
+            raise PublicWriteRefused("one-time public publish gate host mismatch")
+        if write.room != self.room:
+            self.close()
+            raise PublicWriteRefused("one-time public publish gate room mismatch")
+        if write.nonce != self.nonce:
+            self.close()
+            raise PublicWriteRefused("one-time public publish gate nonce mismatch")
+        actual_hash = hashlib.sha256(write.swept_text.encode("utf-8")).hexdigest()
+        if actual_hash != self.message_sha256:
+            self.close()
+            raise PublicWriteRefused("one-time public publish gate message mismatch")
+        self._used = True
+
+    def close(self) -> None:
+        self._closed = True
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +252,27 @@ class TechnocoreClient:
         return self._host in PUBLIC_HOSTS
 
     @property
+    def host(self) -> str:
+        return self._host
+
+    @property
     def is_loopback(self) -> bool:
         return self._host in LOOPBACK_HOSTS
 
-    def _assert_write_allowed(self) -> None:
+    def _assert_write_allowed(
+        self,
+        write: SignedWrite,
+        *,
+        public_gate: OneTimePublicWriteGate | None = None,
+    ) -> None:
+        if public_gate is not None:
+            if not self.is_public:
+                public_gate.close()
+                raise PublicWriteRefused(
+                    "one-time public publish gate may only be used for public hosts"
+                )
+            public_gate.consume(host=self._host, write=write)
+            return
         if self.is_public:
             raise PublicWriteRefused(
                 f"writes to {self._host} are blocked in M1. Posting the first "
@@ -330,25 +409,46 @@ class TechnocoreClient:
         )
 
     # --- guarded write -------------------------------------------------
-    def send_signed_message(self, write: SignedWrite) -> dict[str, Any]:
+    def send_signed_message(
+        self,
+        write: SignedWrite,
+        *,
+        public_gate: OneTimePublicWriteGate | None = None,
+    ) -> dict[str, Any]:
         """Send a prepared signed write. Local instances only.
 
         Callers must have recorded a ``technocore.write.intent`` ledger row
         before calling this, and must record a linked result row afterwards.
         """
-        self._assert_write_allowed()
-        if not write.verifies():
-            raise TechnocoreError("refusing to send a write that fails local verification")
-        self._budget.writes.acquire()
         try:
-            response = self._client.get(self.base_url + write.path)
-        except httpx.HTTPError as exc:
-            raise TechnocoreError(f"signed write failed: {type(exc).__name__}") from None
-        if response.status_code >= 400:
-            raise TechnocoreError(
-                f"signed write rejected with HTTP {response.status_code}"
-            )
-        try:
-            return response.json()
-        except (json.JSONDecodeError, ValueError):
-            return {"raw": response.text[:512]}
+            if not write.verifies():
+                raise TechnocoreError(
+                    "refusing to send a write that fails local verification"
+                )
+            self._assert_write_allowed(write, public_gate=public_gate)
+            self._budget.writes.acquire()
+            try:
+                response = self._client.get(self.base_url + write.path)
+            except httpx.HTTPError as exc:
+                raise TechnocoreError(
+                    f"signed write failed: {type(exc).__name__}"
+                ) from None
+            if response.status_code >= 400:
+                raise TechnocoreError(
+                    f"signed write rejected with HTTP {response.status_code}"
+                )
+            try:
+                return response.json()
+            except (json.JSONDecodeError, ValueError):
+                return {"raw": response.text[:512]}
+        finally:
+            if public_gate is not None:
+                public_gate.close()
+
+
+def _is_sha256(value: str) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdefABCDEF" for char in value)
+    )
