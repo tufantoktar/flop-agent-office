@@ -7,9 +7,9 @@ Rules this module enforces mechanically, not by convention:
 2. ``repr()``, ``str()``, ``format()`` and pickling never reveal key material.
    Pickling is refused outright -- a pickled key is a key written to disk.
 3. Exceptions raised here carry a path or a reason, never file content.
-4. Nothing in M1 loads a real key. :func:`load_encrypted_pem` exists and is
-   tested against keys generated inside the test process; it is not wired to any
-   production code path. :func:`production_signer` deliberately raises.
+4. The only real-key wiring path is explicit and capability-scoped. This module
+   never discovers a keystore and never returns a production raw signer.
+   :func:`production_signer` deliberately raises.
 5. Real DID generation and rotation are not implemented. Both require an
    explicit, interactive human decision that this codebase does not take.
 """
@@ -50,6 +50,7 @@ _MIN_PASSPHRASE_LEN: Final = 12
 #: this constant documents the policy and gives the future wiring step a default
 #: to validate against. It is never read at import.
 DEFAULT_KEYSTORE_DIR: Final = "~/.flopoffice/keys/"
+REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 
 
 class KeystoreError(Exception):
@@ -167,7 +168,7 @@ def save_encrypted_pem(
     )
 
 
-def load_encrypted_pem(path: Path | str, passphrase: str) -> PrivateKeyHandle:
+def load_encrypted_pem(path: Path | str, passphrase: str | bytes) -> PrivateKeyHandle:
     """Load an encrypted PKCS#8 Ed25519 private key from ``path``.
 
     Implemented and unit-tested against keys created inside the test process.
@@ -175,11 +176,19 @@ def load_encrypted_pem(path: Path | str, passphrase: str) -> PrivateKeyHandle:
     root-agent keystore until the signing milestone is explicitly approved.
     """
     p = Path(path).expanduser()
+    if _is_inside_repo(p):
+        raise KeystoreError(
+            "keystore path is inside the repository working tree; keep signing "
+            "keys outside the repo"
+        )
+    if p.is_symlink():
+        raise KeystoreError("keystore path is a symlink; refusing to follow it")
     if not p.exists():
         raise KeystoreError(f"keystore not found: {p}")
     if not p.is_file():
         raise KeystoreError(f"keystore path is not a regular file: {p}")
-    if not isinstance(passphrase, str) or len(passphrase) < _MIN_PASSPHRASE_LEN:
+    passphrase_bytes = _passphrase_bytes(passphrase)
+    if len(passphrase_bytes) < _MIN_PASSPHRASE_LEN:
         raise KeystoreError(
             f"passphrase must be at least {_MIN_PASSPHRASE_LEN} characters"
         )
@@ -209,7 +218,7 @@ def load_encrypted_pem(path: Path | str, passphrase: str) -> PrivateKeyHandle:
                 "plaintext fallback -- re-export the key with a passphrase."
             )
         key = serialization.load_pem_private_key(
-            data, password=passphrase.encode("utf-8")
+            data, password=passphrase_bytes
         )
     except KeystoreError:
         raise
@@ -225,6 +234,22 @@ def load_encrypted_pem(path: Path | str, passphrase: str) -> PrivateKeyHandle:
     return PrivateKeyHandle(key, label=p.name)
 
 
+def _passphrase_bytes(passphrase: str | bytes) -> bytes:
+    if isinstance(passphrase, str):
+        return passphrase.encode("utf-8")
+    if isinstance(passphrase, bytes):
+        return passphrase
+    raise KeystoreError("passphrase must be supplied at runtime as str or bytes")
+
+
+def _is_inside_repo(path: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(REPO_ROOT)
+    except ValueError:
+        return False
+    return True
+
+
 def derive_did(handle: PrivateKeyHandle) -> DidKey:
     """The did:key implied by a loaded private key.
 
@@ -236,9 +261,8 @@ def derive_did(handle: PrivateKeyHandle) -> DidKey:
 
 
 def production_signer():
-    """Deliberately unavailable in M1."""
+    """Deliberately unavailable: production code must use capabilities only."""
     raise KeyNotWiredError(
-        "No production signer exists in M1. The root agent's private key is not "
-        "loaded, imported or referenced by any code path. Wiring it is a separate, "
-        "explicitly approved step."
+        "No raw production signer is available. Root-agent signing, when "
+        "explicitly enabled, returns only a CapabilitySigner."
     )

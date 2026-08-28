@@ -20,11 +20,12 @@ reach the key, so a caller that gets confused signs a well-formed Technocore
 statement at worst -- never an attestation, a transaction, or a challenge
 response for some other protocol that happens to use Ed25519.
 
-Scope in M1.1
+Scope through M1.4
 -------------
-This is the interface and its guards, tested against ephemeral keys. **No real
-key is wired.** :func:`root_agent_capability_signer` raises, exactly as
-``keystore.production_signer`` does.
+This is the interface and its guards, tested against ephemeral keys. The root
+agent path is fail-closed by default and opens only when the caller supplies an
+explicit runtime passphrase and passes ``enable=True``. Even then it returns
+only this capability wrapper; no raw ``Signer`` escapes.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ from .canonical import (
     validate_room,
 )
 from .did import DidKey
-from .keystore import KeyNotWiredError
+from .keystore import KeyNotWiredError, KeystoreError
 from .signer import Signer
 
 __all__ = [
@@ -220,15 +221,46 @@ class CapabilitySigner:
         return [n for n in super().__dir__() if "__sign" not in n]
 
 
-def root_agent_capability_signer() -> CapabilitySigner:
-    """Deliberately unavailable.
+def root_agent_capability_signer(
+    passphrase: str | bytes | None = None,
+    *,
+    enable: bool = False,
+    allow_notes: bool = False,
+    environ: dict[str, str] | None = None,
+) -> CapabilitySigner:
+    """Return the root agent capability signer through the sanctioned path.
 
-    Wiring the root agent's key -- even behind this narrowed interface -- is a
-    separate, explicitly approved step. M1.1 ships the interface and its tests,
-    not the key.
+    This is closed by default. Opening it requires a deliberate call with
+    ``enable=True``, an explicit runtime passphrase, and an explicit
+    ``FLOPOFFICE_KEYSTORE`` setting. The function never returns a raw
+    :class:`~identity.signer.Signer`; it delegates to ``build_capability_signer``
+    and returns only the narrowed capability wrapper.
+
+    ``environ`` exists for tests and controlled embedding. It carries public/path
+    configuration only and does not load a key by itself.
     """
-    raise KeyNotWiredError(
-        "No root-agent capability signer exists. The private key is not loaded, "
-        "imported or referenced by any code path. Wiring it requires an explicit "
-        "human decision after the conformance result is reviewed."
+    if not enable:
+        raise KeyNotWiredError(
+            "root-agent signer wiring is disabled. Pass enable=True only from a "
+            "reviewed caller with an explicit runtime passphrase."
+        )
+    if passphrase is None:
+        raise KeystoreError("root-agent signer wiring requires a runtime passphrase")
+
+    from config.settings import ConfigError, load  # noqa: PLC0415
+    from identity.wiring import build_capability_signer  # noqa: PLC0415
+
+    settings = load(environ)
+    if settings.keystore_path is None:
+        raise ConfigError(
+            "FLOPOFFICE_KEYSTORE must be explicitly set before root-agent signer "
+            "wiring can be enabled"
+        )
+
+    return build_capability_signer(
+        settings.keystore_path,
+        passphrase,
+        settings.root_agent_did,
+        allow_notes=allow_notes,
+        reviewed=True,
     )

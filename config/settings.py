@@ -23,6 +23,7 @@ from identity.did import DidKey, DidKeyError
 __all__ = ["Settings", "ConfigError", "load", "DidSource"]
 
 DidSource = Literal["committed", "environment"]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 FORBIDDEN_ENV_SUBSTRINGS = ("PRIVATE_KEY", "PASSPHRASE", "SEED", "MNEMONIC", "SECRET")
 
@@ -45,6 +46,16 @@ class Settings:
     @property
     def is_prod(self) -> bool:
         return self.env == "prod"
+
+    @property
+    def root_signer_configured(self) -> bool:
+        return self.keystore_path is not None
+
+    @property
+    def root_signer_enabled(self) -> bool:
+        # The signer gate is a runtime function argument, not an environment
+        # variable, so configuration alone can never enable it.
+        return False
 
 
 def _reject_secret_env() -> None:
@@ -90,7 +101,7 @@ def load(environ: dict[str, str] | None = None) -> Settings:
     keystore_path = Path(keystore).expanduser() if keystore else None
     if keystore_path is not None:
         try:
-            keystore_path.resolve().relative_to(Path.cwd().resolve())
+            keystore_path.resolve(strict=False).relative_to(REPO_ROOT)
         except ValueError:
             pass  # outside the repo: correct
         else:

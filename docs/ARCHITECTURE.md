@@ -151,16 +151,23 @@ Note segments are validated against Technocore's own charset
 reject with 400 is refused here instead -- a wasted nonce is the cheapest thing
 this check saves.
 
-`root_agent_capability_signer()` still raises: the interface and its tests ship,
-the key does not.
+`root_agent_capability_signer()` is the M1.4 public gate. It raises by default
+and returns a `CapabilitySigner` only when a caller supplies an explicit runtime
+passphrase, passes `enable=True`, and has configured `FLOPOFFICE_KEYSTORE`.
+It never returns a raw `Signer`.
 
-## The root signer path (designed, not wired)
+## The root signer path (explicitly gated)
 
 `identity/wiring.py` is the single route from a keystore file to something that
 can sign, and it is deliberately short:
 
 ```
-load_encrypted_pem  ->  assert_key_matches_did  ->  CapabilitySigner
+ROOT_AGENT_DID
+  -> explicit FLOPOFFICE_KEYSTORE config
+  -> load_encrypted_pem
+  -> assert_key_matches_did
+  -> build_capability_signer(..., reviewed=True)
+  -> CapabilitySigner
 ```
 
 The ordering is the design. Identity is verified *before* any signing object is
@@ -169,15 +176,27 @@ mismatch raises `DidMismatchError`, names both public DIDs, and says explicitly
 not to change the configured DID to match the key -- because the tempting fix is
 the wrong one.
 
-`build_capability_signer` refuses unless called with `reviewed=True`. That gate
-is not a config value on purpose: opening it is a diff someone signs off on, and
-an AST-based test asserts no production module passes it today.
+`root_agent_capability_signer(passphrase, enable=True)` adds the public opt-in
+gate. `enable=False` raises `KeyNotWiredError`; missing keystore configuration
+raises `ConfigError`; a missing passphrase, wrong passphrase, plaintext key or
+permission failure fails closed; a DID mismatch raises `DidMismatchError`.
+
+`build_capability_signer` still refuses unless called with `reviewed=True`. That
+gate is not a config value on purpose: opening it is a reviewed code path, and
+an AST-based test asserts the root capability entry point is the only production
+call site that passes it.
 
 Loading enforces the keystore policy: encrypted PKCS#8 only (no plaintext
-fallback), regular file, `0600` on the file **and** `0700` on its directory --
-because `0600` protects nothing if a third party can replace the file. The
-default location, `~/.flopoffice/keys/`, is a documented constant, never a search
-path; a test asserts no module builds a keystore path for itself.
+fallback), regular non-symlink file, `0600` on the file **and** `0700` on its
+directory -- because `0600` protects nothing if a third party can replace the
+file. Repo-local keystore paths are refused. The default location,
+`~/.flopoffice/keys/`, is a documented constant, never a search path; a test
+asserts no module builds a keystore path for itself.
+
+`doctor` and `settings.load()` never load a key or construct a signer. `doctor`
+reports only whether root signer path configuration exists, that the runtime
+gate is not enabled, and whether the capability is `NOT LOADED` or
+`READY-BY-CONFIG`.
 
 ## What a read from Technocore can and cannot prove
 
@@ -191,8 +210,9 @@ somebody else's say-so.
 
 ## Deliberate absences
 
-No production signer. No real DID generation or rotation. No public Technocore
-write. No FLOP adapter, faucet client, wallet, provider router, policy engine or
-agent orchestration. Each of those is a separate, explicitly approved step; see
-`docs/FLOP_FACTS.md` for which of them depend on documentation Flop Labs has not
-published yet.
+No raw production signer. No real DID generation or rotation. No public
+Technocore write. No FLOP adapter, faucet client, wallet, provider router,
+policy engine or agent orchestration. Wiring a local capability signer does not
+authorize publication; each of those is a separate, explicitly approved step.
+See `docs/FLOP_FACTS.md` for which of them depend on documentation Flop Labs has
+not published yet.

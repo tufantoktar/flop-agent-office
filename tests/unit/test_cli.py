@@ -76,7 +76,10 @@ def test_doctor_states_the_safety_posture(capsys, monkeypatch) -> None:
     monkeypatch.delenv("FLOPOFFICE_ROOT_AGENT_DID", raising=False)
     assert main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "NOT WIRED" in out
+    assert "root signer configured: no" in out
+    assert "root signer enabled:    no" in out
+    assert "capability signer:      NOT LOADED" in out
+    assert "RAW SIGNER UNAVAILABLE" in out
     assert "WRITES BLOCKED" in out
     assert "FLOP / faucet / wallet code: NONE" in out
 
@@ -92,6 +95,18 @@ def test_config_rejects_a_keystore_inside_the_repo(monkeypatch, repo_root: Path)
 
     import pytest  # noqa: PLC0415
 
+    with pytest.raises(ConfigError, match="inside the repository"):
+        load({"FLOPOFFICE_KEYSTORE": str(repo_root / "keys" / "root.pem")})
+
+
+def test_config_rejects_repo_keystore_independent_of_cwd(
+    monkeypatch, repo_root: Path, tmp_path: Path
+) -> None:
+    from config.settings import ConfigError, load  # noqa: PLC0415
+
+    import pytest  # noqa: PLC0415
+
+    monkeypatch.chdir(tmp_path)
     with pytest.raises(ConfigError, match="inside the repository"):
         load({"FLOPOFFICE_KEYSTORE": str(repo_root / "keys" / "root.pem")})
 

@@ -5,7 +5,9 @@ FlopOffice — milestone **M1, "Signed and accounted for"**.
 An identity layer, an append-only proof ledger, and a read-only Technocore
 client with a hard untrusted-data boundary. Nothing else. There is no wallet
 code, no FLOP endpoint, no faucet client, no policy engine and no agent
-orchestration in this repository yet, and no code path loads a real private key.
+orchestration in this repository yet. The root signer wiring path exists, but
+it is disabled by default and never loads a key unless an explicit caller passes
+a runtime passphrase and `enable=True`.
 
 ## What M1 contains
 
@@ -46,12 +48,15 @@ What this identifier is **not**:
 | not an on-chain identity | no published FLOP document maps `did:key` to a chain account |
 | not authorisation to sign | configuring it wires nothing |
 
-**The private signer is not connected.** `identity.keystore.production_signer()`
-and `identity.capability.root_agent_capability_signer()` both raise by design.
-Configuring a public DID does not change that, and is not a step toward it that
-happens on its own.
+**The private signer is not connected by default.**
+`identity.keystore.production_signer()` still raises by design and never returns
+a raw signer. `identity.capability.root_agent_capability_signer(passphrase,
+enable=True)` is the single sanctioned M1.4 path, and it returns only a
+`CapabilitySigner` after explicit keystore config, runtime passphrase, DID match
+and permission checks all pass. Configuring a public DID or keystore path alone
+does not enable signing.
 
-### How the signer will be wired, when it is
+### How the signer is wired, when explicitly enabled
 
 One path, in `identity/wiring.py`, and nothing else:
 
@@ -60,15 +65,20 @@ ROOT_AGENT_DID (committed, public)
   -> keystore path (local config; never auto-discovered)
   -> load_encrypted_pem(path, passphrase)     encrypted PKCS#8 only, 0600 file, 0700 dir
   -> assert_key_matches_did(handle, expected) fail closed on mismatch
+  -> build_capability_signer(..., reviewed=True)
   -> CapabilitySigner(...)                    the only object a caller receives
   -> sign_technocore_message / sign_technocore_note
 ```
 
 Three properties hold that path shut and keep it narrow:
 
-* **`build_capability_signer(..., reviewed=True)` is closed by default.** The
-  keyword exists so wiring is a reviewed code change, not the consequence of
-  setting a config value. A test asserts no production module passes it.
+* **`root_agent_capability_signer(..., enable=True)` is closed by default.** A
+  caller must opt in at the call site; no environment variable enables signing
+  on its own.
+* **`build_capability_signer(..., reviewed=True)` is still accounted for.** The
+  keyword exists so low-level wiring is a reviewed code path, not the accidental
+  consequence of setting a config value. A test asserts the root capability
+  entry point is the only production call site that passes it.
 * **The identity is checked before a signer exists.** If the key in the file does
   not derive `ROOT_AGENT_DID`, the call raises `DidMismatchError` and no signing
   object is ever constructed. Fail closed, always -- the fix is to correct the
@@ -82,23 +92,24 @@ Three properties hold that path shut and keep it narrow:
 **Keystore policy.** The expected location is `~/.flopoffice/keys/` -- outside
 any repository, directory `0700`, file `0600`, encrypted PKCS#8 with a passphrase
 of at least 12 characters. There is **no plaintext fallback** and **no
-auto-discovery**: nothing reads a path from the repository, the working
-directory, `~/Downloads`, `~/.flopoffice` or the environment on its own. Every
-keystore input arrives as an explicit argument, and the path is never printed by
-`doctor`.
+auto-discovery**: nothing searches the repository, the working directory,
+`~/Downloads`, `~/.flopoffice` or default filenames. The only runtime path comes
+from explicit `FLOPOFFICE_KEYSTORE` configuration, and the path is never printed
+by `doctor`.
 
 The whole path is exercised end to end in `tests/security/test_signer_wiring.py`
 against **throwaway keys generated inside the test process**, written to
 `tmp_path`, and deleted with an assertion that no `.pem` survives.
 
-**The first public Technocore signed message remains blocked** pending a separate
-review of signer wiring. `technocore.chat` is on a host denylist that no
-environment variable unlocks.
+**The first public Technocore signed message remains blocked.** M1.4 wires a
+local signing capability only; it does not authorize publishing. `technocore.chat`
+is on a host denylist that no environment variable unlocks.
 
 ## Safety posture
 
-* **No production signer.** `identity.keystore.production_signer()` raises by
-  design. The root agent's private key is not loaded, imported, or referenced.
+* **No raw production signer.** `identity.keystore.production_signer()` raises
+  by design. Root-agent signing, when explicitly enabled, returns only a
+  `CapabilitySigner`.
 * **No real DID generation or rotation.** Both are human actions taken outside
   this codebase. `generate_ephemeral()` exists for tests and refuses to run when
   `FLOPOFFICE_ENV=prod`.
@@ -172,7 +183,8 @@ prints the matched text.
 
 The public DID is a public artefact and is committed (see **Identity** above).
 The keystore holding the *private* key is a separate file that lives outside the
-repository and is not read by any code path.
+repository and is not read by settings or `doctor`. It is loaded only by an
+explicit runtime capability call.
 
 ## Status of FLOP claims
 

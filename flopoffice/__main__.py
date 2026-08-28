@@ -109,7 +109,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(f"  env:                 {settings.env}")
     print(f"  ledger:              {settings.ledger_path}")
     print(f"  root agent DID:      {shown}  ({settings.root_agent_did_source})")
-    print(f"  keystore configured: {'yes' if settings.keystore_path else 'no'} (never loaded)")
+    capability_state = (
+        "READY-BY-CONFIG" if settings.root_signer_configured else "NOT LOADED"
+    )
+    print(f"  root signer configured: {'yes' if settings.root_signer_configured else 'no'}")
+    print(f"  root signer enabled:    {'yes' if settings.root_signer_enabled else 'no'}")
+    print(f"  capability signer:      {capability_state} (key never loaded by doctor)")
     print(f"  technocore base url: {settings.technocore_base_url or '<unset>'}")
     print(f"  local writes:        {'enabled' if settings.allow_local_write else 'disabled'}")
     print()
@@ -117,8 +122,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print("    not a wallet, not proof of trust, not proof of FLOP eligibility,")
     print("    not an on-chain identity, and not authorisation to sign.")
     print()
-    print("  production signer:   NOT WIRED (by design)")
-    print("  capability signer:   NOT WIRED (by design)")
+    print("  production signer:   RAW SIGNER UNAVAILABLE")
     print("  public technocore:   WRITES BLOCKED (host denylist)")
     print("  FLOP / faucet / wallet code: NONE")
     return EXIT_OK

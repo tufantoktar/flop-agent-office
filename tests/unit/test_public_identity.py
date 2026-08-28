@@ -302,7 +302,8 @@ def test_doctor_shows_the_public_did_and_no_private_data(capsys) -> None:
 
     for forbidden in ("PRIVATE", "passphrase", "BEGIN", ".pem", ".jwk", "keystore path"):
         assert forbidden not in out
-    assert "NOT WIRED" in out
+    assert "RAW SIGNER UNAVAILABLE" in out
+    assert "NOT LOADED" in out
     assert "not authorisation to sign" in out
 
 

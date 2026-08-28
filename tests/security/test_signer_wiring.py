@@ -21,7 +21,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from config.public_identity import ROOT_AGENT, ROOT_AGENT_DID
+from config.public_identity import ENV_OVERRIDE, ROOT_AGENT, ROOT_AGENT_DID
+from config.settings import ConfigError
 from identity.canonical import CanonicalisationError, UntrustedInputError
 from identity.capability import (
     CapabilityError,
@@ -330,15 +331,125 @@ def test_untrusted_technocore_content_cannot_reach_the_signer(keystore) -> None:
         granted.sign_technocore_note("room-owners", "d-flop", 1, hostile)  # type: ignore[arg-type]
 
 
-# --- 13/14. the production gates stay shut --------------------------------
+# --- 13/14. the production gates stay explicit -----------------------------
 def test_production_signer_still_raises() -> None:
     with pytest.raises(KeyNotWiredError):
         production_signer()
 
 
-def test_root_agent_capability_signer_still_raises() -> None:
+def test_root_agent_capability_signer_disabled_by_default() -> None:
     with pytest.raises(KeyNotWiredError):
         root_agent_capability_signer()
+
+
+def test_root_agent_capability_signer_enable_false_raises(keystore) -> None:
+    path, expected = keystore
+    with pytest.raises(KeyNotWiredError):
+        root_agent_capability_signer(
+            PASSPHRASE,
+            enable=False,
+            environ={"FLOPOFFICE_KEYSTORE": str(path), ENV_OVERRIDE: expected.did},
+        )
+
+
+def test_root_agent_capability_signer_requires_configured_keystore() -> None:
+    with pytest.raises(ConfigError, match="FLOPOFFICE_KEYSTORE"):
+        root_agent_capability_signer(PASSPHRASE, enable=True, environ={})
+
+
+def test_root_agent_capability_signer_requires_runtime_passphrase(keystore) -> None:
+    path, expected = keystore
+    with pytest.raises(KeystoreError, match="runtime passphrase"):
+        root_agent_capability_signer(
+            enable=True,
+            environ={"FLOPOFFICE_KEYSTORE": str(path), ENV_OVERRIDE: expected.did},
+        )
+
+
+def test_root_agent_capability_signer_rejects_wrong_passphrase(keystore) -> None:
+    path, expected = keystore
+    with pytest.raises(KeystoreError) as exc:
+        root_agent_capability_signer(
+            "definitely-not-the-passphrase",
+            enable=True,
+            environ={"FLOPOFFICE_KEYSTORE": str(path), ENV_OVERRIDE: expected.did},
+        )
+    message = str(exc.value)
+    assert PASSPHRASE not in message
+    assert "definitely-not-the-passphrase" not in message
+    assert "BEGIN" not in message
+
+
+def test_root_agent_capability_signer_returns_only_capability(keystore) -> None:
+    path, expected = keystore
+    capability = root_agent_capability_signer(
+        PASSPHRASE,
+        enable=True,
+        environ={"FLOPOFFICE_KEYSTORE": str(path), ENV_OVERRIDE: expected.did},
+    )
+
+    assert isinstance(capability, CapabilitySigner)
+    assert not hasattr(capability, "sign")
+    assert not hasattr(capability, "signer")
+    assert not hasattr(capability, "raw_signer")
+    assert not hasattr(capability, "wrapped_signer")
+    assert not hasattr(capability, "key")
+    assert not hasattr(capability, "key_handle")
+    assert not hasattr(capability, "private_key")
+
+    signed = capability.sign_technocore_message("e-p-m14", 1, "hello m14")
+    assert signed.did == expected.did
+    assert verify_message(expected.did, signed.signature, "e-p-m14", 1, "hello m14")
+
+
+def test_root_agent_capability_signer_accepts_bytes_passphrase(keystore) -> None:
+    path, expected = keystore
+    capability = root_agent_capability_signer(
+        PASSPHRASE.encode("utf-8"),
+        enable=True,
+        environ={"FLOPOFFICE_KEYSTORE": str(path), ENV_OVERRIDE: expected.did},
+    )
+    assert isinstance(capability, CapabilitySigner)
+
+
+def test_root_agent_capability_signer_mismatch_fails_closed(keystore) -> None:
+    path, _ = keystore
+    with pytest.raises(DidMismatchError) as exc:
+        root_agent_capability_signer(
+            PASSPHRASE,
+            enable=True,
+            environ={"FLOPOFFICE_KEYSTORE": str(path)},
+        )
+    assert "Refusing to sign" in str(exc.value)
+
+
+def test_root_agent_capability_signer_rejects_repo_local_keystore(repo_root: Path) -> None:
+    with pytest.raises(ConfigError, match="inside the repository"):
+        root_agent_capability_signer(
+            PASSPHRASE,
+            enable=True,
+            environ={"FLOPOFFICE_KEYSTORE": str(repo_root / "root.pem")},
+        )
+
+
+def test_load_encrypted_pem_rejects_repo_local_path(repo_root: Path) -> None:
+    with pytest.raises(KeystoreError, match="inside the repository"):
+        load_encrypted_pem(repo_root / "root.pem", PASSPHRASE)
+
+
+def test_load_encrypted_pem_rejects_symlink(keystore, tmp_path: Path) -> None:
+    path, _ = keystore
+    link_dir = tmp_path / "links"
+    link_dir.mkdir()
+    link_dir.chmod(0o700)
+    link = link_dir / "root-link.pem"
+    link.symlink_to(path)
+
+    try:
+        with pytest.raises(KeystoreError, match="symlink"):
+            load_encrypted_pem(link, PASSPHRASE)
+    finally:
+        link.unlink(missing_ok=True)
 
 
 def test_build_capability_signer_is_closed_by_default(keystore) -> None:
@@ -350,16 +461,16 @@ def test_build_capability_signer_is_closed_by_default(keystore) -> None:
     assert REVIEW_GATE_MESSAGE == str(exc.value)
 
 
-def test_nothing_passes_the_review_gate_outside_tests(repo_root: Path) -> None:
-    """Production code must not *call* build_capability_signer(reviewed=True).
+def test_only_root_capability_entry_point_passes_the_review_gate(repo_root: Path) -> None:
+    """Production code may pass reviewed=True in one sanctioned place only.
 
     Matched on the AST, not on text: a first attempt grepped for the literal and
     flagged wiring.py's own docstring, which explains the gate. Prose about a
-    gate is documentation; a call through it is the thing to forbid.
+    gate is documentation; a call through it is the thing to account for.
     """
     import ast  # noqa: PLC0415
 
-    offenders = []
+    calls = []
     for package in ("config", "identity", "technocore", "proof", "storage",
                     "flopoffice", "tools"):
         root = repo_root / package
@@ -377,10 +488,13 @@ def test_nothing_passes_the_review_gate_outside_tests(repo_root: Path) -> None:
                         continue
                     value = keyword.value
                     if isinstance(value, ast.Constant) and value.value is True:
-                        offenders.append(
-                            f"{path.relative_to(repo_root).as_posix()}:{node.lineno}"
+                        call = ast.unparse(node.func)
+                        calls.append(
+                            f"{path.relative_to(repo_root).as_posix()}:{node.lineno}:{call}"
                         )
-    assert not offenders, f"the review gate is passed in production code: {offenders}"
+    assert len(calls) == 1, f"unexpected review-gate call sites: {calls}"
+    assert calls[0].startswith("identity/capability.py:")
+    assert calls[0].endswith(":build_capability_signer")
 
 
 # --- 17. nothing leaks in repr/str/errors ---------------------------------
@@ -476,7 +590,9 @@ def test_settings_load_and_doctor_create_no_signer(monkeypatch, capsys) -> None:
     assert settings.root_agent_did.did == ROOT_AGENT_DID
 
     out = capsys.readouterr().out
-    assert "NOT WIRED" in out
+    assert "RAW SIGNER UNAVAILABLE" in out
+    assert "capability signer:" in out
+    assert "NOT LOADED" in out
     for forbidden in ("BEGIN", "PRIVATE", "passphrase", ".pem", ".jwk",
                       DEFAULT_KEYSTORE_DIR):
         assert forbidden not in out, forbidden
@@ -492,7 +608,9 @@ def test_doctor_never_prints_a_keystore_path(monkeypatch, capsys, tmp_path) -> N
     out = capsys.readouterr().out
     assert str(keystore_path) not in out
     assert "root.pem" not in out
-    assert "keystore configured: yes" in out
+    assert "root signer configured: yes" in out
+    assert "root signer enabled:    no" in out
+    assert "READY-BY-CONFIG" in out
 
 
 # --- 18/19 live in tests/security/test_secret_scan.py ---------------------

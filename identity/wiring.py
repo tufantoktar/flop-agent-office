@@ -21,12 +21,13 @@ and immediately wraps it; the wrapper is what is returned, and the wrapper holds
 the signer in a closure rather than an attribute. Nothing in this module hands a
 `sign(bytes)` oracle to a caller.
 
-**It is closed by default.** The function refuses unless the caller passes
-``reviewed=True`` -- a keyword that exists to make wiring a deliberate, greppable
-act rather than something that happens because a config value was set. In M1.3
-the only callers that pass it are tests using throwaway keys.
-:func:`root_agent_capability_signer` does not pass it and never will until that
-is a reviewed change.
+**It is closed by default.** The low-level function refuses unless the caller
+passes ``reviewed=True`` -- a keyword that exists to make wiring a deliberate,
+greppable act rather than something that happens because a config value was set.
+In M1.4 the single production caller is
+:func:`identity.capability.root_agent_capability_signer`, which adds its own
+``enable=True`` gate, runtime passphrase requirement and explicit keystore
+configuration check before it can reach this function.
 
 Nothing here reads a path on its own. There is no auto-discovery from the
 repository, the working directory, ``~/Downloads``, ``~/.flopoffice`` or the
@@ -101,7 +102,7 @@ def assert_key_matches_did(handle: PrivateKeyHandle, expected: DidKey | str) -> 
 
 def build_capability_signer(
     keystore_path: Path | str,
-    passphrase: str,
+    passphrase: str | bytes,
     expected_did: DidKey | str,
     *,
     allow_notes: bool = False,
@@ -127,7 +128,7 @@ def build_capability_signer(
 
 
 # NOTE: the public gate stays where it already was --
-# identity.capability.root_agent_capability_signer -- so there is one name for it
-# and existing tests and docs keep pointing at the same thing. When it is opened
-# it must call build_capability_signer() above, so the DID check and the
-# capability wrapper cannot be bypassed.
+# identity.capability.root_agent_capability_signer -- so there is one name for
+# it and existing tests and docs keep pointing at the same thing. It calls this
+# function with reviewed=True only after its own explicit gate and config checks
+# pass, so the DID check and capability wrapper cannot be bypassed.
