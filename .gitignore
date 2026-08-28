@@ -9,7 +9,6 @@
 *.p12
 *.pfx
 *.keystore
-keystore*
 identity.pem
 .env
 .env.*
@@ -44,3 +43,5 @@ dist/
 .coverage
 htmlcov/
 .DS_Store
+/keystore.json
+/keystore.d/
