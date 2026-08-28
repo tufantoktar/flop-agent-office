@@ -175,6 +175,13 @@ a DID on the read path is *the server's claim about authorship*, not evidence we
 checked. `UntrustedMessage.signature_returned` records which case applies, and
 the author label reads `server-asserted, unverified`.
 
+This also shapes M1.6. The first public announcement can be prepared, signed,
+and verified locally, but a future room read will not give the signature back.
+The retained local proof therefore stores the canonical text, signature,
+algorithm, canonicalization profile, room and nonce with `Technocore status =
+NOT_SENT`. That record can prove authorship of the prepared payload; it cannot
+prove publication.
+
 **A percent-encoded LF cannot traverse the GET write lane.** `%0A` in a path
 segment answers `404 no route matched`. `%0D`, `%00`, `%09` and `%E2%80%A8` all
 pass. The same message succeeds over `POST /r/<room>` and stores with the LF as a

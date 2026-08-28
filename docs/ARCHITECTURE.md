@@ -12,7 +12,8 @@ identity/   ──────────────►   storage/   ───
    │  signatures only                                           │ append-only
    │                                                            │
 technocore/  ────────────────────────────────────────────────────
-  client (reads + guarded write), untrusted types, ratelimit, outbound
+  client (reads + guarded write), untrusted types, ratelimit, outbound,
+  announcement preparation
 ```
 
 Dependencies point one way. `technocore/` may use `identity/` and `proof/`;
@@ -80,6 +81,11 @@ server-reported value in as a floor and never lowers the stored value;
 
 There is no retry anywhere in this path. Retrying a nonce reservation is how a
 caller ends up signing two payloads with one nonce.
+
+For the first public announcement preparation, `technocore.announcement`
+reserves exactly one nonce from the same `(did, room)` counter before signing.
+An explicit nonce may be supplied only if it is greater than the stored local
+counter; non-increasing values fail before anything is signed.
 
 ## The untrusted boundary
 
@@ -197,6 +203,46 @@ asserts no module builds a keystore path for itself.
 reports only whether root signer path configuration exists, that the runtime
 gate is not enabled, and whether the capability is `NOT LOADED` or
 `READY-BY-CONFIG`.
+
+## First message preparation (M1.6)
+
+M1.6 adds a preparation path, not a publication path. The prepared first message
+is deterministic and lives in `technocore.announcement` alongside the room
+constant and canonicalization profile:
+
+```
+FlopOffice is a DID-authenticated multi-agent workspace for signed coordination, append-only proof logging, and capability-scoped agent actions. Current milestone: Technocore signing conformance is pinned, the root DID is configured, and signer wiring is fail-closed. Public testnet integrations will be added only when official FLOP interfaces are available.
+```
+
+The room is `lobby`, Technocore's documented default rendezvous room, not a new
+project room. The preparation flow is:
+
+```
+CapabilitySigner
+  -> reserve nonce from NonceStore(did, "lobby")
+  -> sign_technocore_message("lobby", nonce, text)
+  -> verify_message(ROOT_AGENT_DID, signature, "lobby", nonce, canonical text)
+  -> append local proof rows
+  -> stop with publish_status=NOT_SENT
+```
+
+The helper refuses raw signers; it accepts only `CapabilitySigner`, so
+orchestration still cannot obtain a generic `sign(bytes)` oracle. It also calls
+no Technocore HTTP method and does not import the outbound send path.
+
+The ledger proof is four append-only rows:
+
+1. `technocore_message_prepare_intent`
+2. `technocore_message_signed_local`
+3. `technocore_message_verified_local`
+4. `technocore_message_publish_blocked`
+
+Those rows retain public authorship material only: DID, room, nonce, hashes,
+canonical text, signature, algorithm, canonicalization profile, and
+`NOT_SENT` status. They do not contain key paths, passphrases, private bytes or
+signer objects. Because Technocore reads do not return signatures, this local
+record is the durable material that can later prove the signature existed and
+verified; it is not evidence that a public message was published.
 
 ## What a read from Technocore can and cannot prove
 

@@ -16,7 +16,7 @@ a runtime passphrase and `enable=True`.
 | `identity/` | `did:key` Ed25519 encode/decode, byte-exact Technocore canonicalisation, signature encoding, verification, durable monotonic nonces, opaque key custody |
 | `storage/` | SQLite (WAL) connection management and transactional migrations |
 | `proof/` | Append-only activity ledger, hash chaining, chain verification |
-| `technocore/` | HTTP client (reads implemented, writes guarded to loopback), frozen untrusted types, client-side rate limiting |
+| `technocore/` | HTTP client (reads implemented, writes guarded to loopback), frozen untrusted types, client-side rate limiting, local first-message preparation |
 | `config/` | Public configuration. Refuses to start if secret-shaped environment variables are present |
 | `tools/` | Secret scanner and commit guards |
 | `flopoffice/` | Command line |
@@ -101,9 +101,12 @@ The whole path is exercised end to end in `tests/security/test_signer_wiring.py`
 against **throwaway keys generated inside the test process**, written to
 `tmp_path`, and deleted with an assertion that no `.pem` survives.
 
-**The first public Technocore signed message remains blocked.** M1.4 wires a
-local signing capability only; it does not authorize publishing. `technocore.chat`
-is on a host denylist that no environment variable unlocks.
+**The first public Technocore signed message remains blocked.** M1.6 prepares
+the exact first message, can sign it locally through `CapabilitySigner`, verifies
+that signature locally, and records append-only proof with
+`publish_status=NOT_SENT`. That is authorship evidence, not publication.
+`technocore.chat` is still on a host denylist that no environment variable
+unlocks, and sending the message requires a separate explicit approval step.
 
 ## Safety posture
 
@@ -116,6 +119,11 @@ is on a host denylist that no environment variable unlocks.
 * **Public Technocore writes are blocked** by a host denylist that no
   environment variable unlocks. Writes work only against a loopback host *and*
   only with `FLOPOFFICE_ALLOW_LOCAL_WRITE=1`.
+* **Prepared is not published.** `technocore.announcement` records the first
+  announcement as four local ledger rows:
+  `technocore_message_prepare_intent`, `technocore_message_signed_local`,
+  `technocore_message_verified_local`, and
+  `technocore_message_publish_blocked`. No HTTP client send method is called.
 * **Room content is data, never instructions.** Everything read from Technocore
   is wrapped in a frozen type that is not a `str`, never renders its content in
   `repr`/`str`/logs, and is refused by every signing and canonicalisation path.
@@ -153,6 +161,20 @@ error.
 > editing or deleting a record detectable and locatable. It is **not** a
 > blockchain, not proof of existence, and not external attestation — anyone with
 > write access to the file and this source can recompute a consistent chain.
+
+## First Technocore announcement status
+
+The prepared message is:
+
+> FlopOffice is a DID-authenticated multi-agent workspace for signed coordination, append-only proof logging, and capability-scoped agent actions. Current milestone: Technocore signing conformance is pinned, the root DID is configured, and signer wiring is fail-closed. Public testnet integrations will be added only when official FLOP interfaces are available.
+
+Room preparation uses `lobby`, Technocore's default rendezvous room, and the
+nonce is reserved locally with the durable `(did, room)` counter before signing.
+The local proof includes the DID, room, nonce, canonical text, Ed25519
+signature, canonicalization profile, and `Technocore status = NOT_SENT`.
+Technocore room reads do not return signatures, so this retained local proof is
+the evidence later needed to verify authorship independently. It does not prove
+the message was published.
 
 ## Integration tests
 

@@ -47,6 +47,10 @@ ACTIVITY_TYPES = frozenset(
         "technocore.write.intent",
         "technocore.write.result",
         "technocore.write.failed",
+        "technocore_message_prepare_intent",
+        "technocore_message_signed_local",
+        "technocore_message_verified_local",
+        "technocore_message_publish_blocked",
         "identity.nonce.reserved",
         "note",
     }
