@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------
+# Secret material. Nothing below this line may ever be committed.
+# ---------------------------------------------------------------
+*.key
+*.pem
+*.jwk
+*.p8
+*.pk8
+*.p12
+*.pfx
+*.keystore
+keystore*
+identity.pem
+.env
+.env.*
+!.env.example
+secrets/
+keys/
+.secrets/
+*.seed
+*.mnemonic
+
+# Local ledger databases (may contain task metadata)
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+
+# ---------------------------------------------------------------
+# Ordinary Python noise
+# ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+.DS_Store

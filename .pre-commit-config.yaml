@@ -1,0 +1,31 @@
+minimum_pre_commit_version: "3.7.0"
+fail_fast: true
+
+repos:
+  - repo: local
+    hooks:
+      - id: flopoffice-secret-scan
+        name: secret scan (private keys, JWKs, mnemonics, API keys)
+        entry: python3.12 tools/secret_scan.py
+        language: system
+        pass_filenames: true
+        require_serial: true
+        exclude: ^\.venv/
+
+      - id: flopoffice-no-key-files
+        name: block key/keystore/env files
+        entry: python3.12 tools/block_key_files.py
+        language: system
+        pass_filenames: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
