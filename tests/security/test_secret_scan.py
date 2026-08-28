@@ -131,3 +131,66 @@ def test_no_key_or_database_files_are_present(repo_root: Path) -> None:
         and path.suffix in {".pem", ".key", ".jwk", ".p8", ".p12", ".sqlite", ".sqlite3"}
     ]
     assert not offenders, f"secret-bearing files present in the tree: {offenders}"
+
+
+# --- regression: the .gitignore must never swallow source files -----------
+def test_no_source_file_is_gitignored(repo_root: Path) -> None:
+    """M1 lost identity/keystore.py to a bare `keystore*` glob.
+
+    Git applies an unanchored pattern to basenames at any depth, so one line in
+    .gitignore silently excluded a module from the initial commit and a fresh
+    clone could not import the package. The hygiene machinery ate a source file
+    and every local test still passed, because the file was on disk.
+
+    This asserts the shape of that failure, not the one instance of it: no
+    tracked-worthy source or documentation file anywhere may be ignored.
+    """
+    import subprocess  # noqa: PLC0415
+
+    candidates = [
+        path
+        for pattern in ("*.py", "*.md", "*.toml", "*.yaml", "*.yml", "*.json")
+        for path in repo_root.rglob(pattern)
+        if path.is_file()
+        and not any(part in {".venv", ".git", "__pycache__", "build", "dist",
+                             ".pytest_cache", "node_modules"}
+                    for part in path.parts)
+    ]
+    assert candidates, "sanity: the glob found nothing"
+
+    relative = [p.relative_to(repo_root).as_posix() for p in candidates]
+    result = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        cwd=repo_root, input="\n".join(relative),
+        capture_output=True, text=True,
+    )
+    ignored = [line for line in result.stdout.splitlines() if line.strip()]
+    assert not ignored, (
+        "these source/doc files are gitignored and would be missing from a clone: "
+        f"{ignored}"
+    )
+
+
+def test_every_python_package_module_is_tracked_or_trackable(repo_root: Path) -> None:
+    """A module that exists on disk but not in git makes local tests lie."""
+    import subprocess  # noqa: PLC0415
+
+    tracked = set(
+        subprocess.run(["git", "ls-files"], cwd=repo_root,
+                       capture_output=True, text=True).stdout.split()
+    )
+    on_disk = {
+        p.relative_to(repo_root).as_posix()
+        for package in ("identity", "technocore", "proof", "storage", "config",
+                        "flopoffice", "tools")
+        for p in (repo_root / package).rglob("*.py")
+        if "__pycache__" not in p.parts
+    }
+    untracked = sorted(on_disk - tracked)
+    # New files this milestone adds are legitimately untracked until staged; what
+    # must never happen is a file git refuses to track at all.
+    unstageable = [
+        path for path in untracked
+        if subprocess.run(["git", "check-ignore", "-q", path], cwd=repo_root).returncode == 0
+    ]
+    assert not unstageable, f"modules git will not track: {unstageable}"

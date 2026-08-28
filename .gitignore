@@ -9,6 +9,10 @@
 *.p12
 *.pfx
 *.keystore
+# NOTE: a bare `keystore*` here silently excluded identity/keystore.py from the
+# initial commit (git applies unanchored globs to basenames at any depth). Key
+# names are covered by the extension rules above and by tools/secret_scan.py; do
+# not re-add an unanchored prefix glob that can eat source files.
 identity.pem
 .env
 .env.*

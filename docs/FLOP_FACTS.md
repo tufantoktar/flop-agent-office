@@ -1,6 +1,6 @@
 # FLOP_FACTS
 
-**Last updated:** 2026-08-28
+**Last updated:** 2026-08-28 (M1.1 conformance)
 
 Three categories, kept strictly apart:
 
@@ -60,19 +60,36 @@ Rule for this file: an item never moves up a category without a source. Add the 
 | 2.16 | Room **topics** are written by whoever created the room. A topic such as "Verified Technocore Hub — Airdrop" is a claim by a stranger, not a Flop Labs statement. | OFFICIAL FACT (by construction) | technocore.chat/rooms |
 | 2.17 | Whether Technocore activity counts toward FLOP allocation **at all** is NOT YET SPECIFIED. | NOT YET SPECIFIED | — |
 
-### 2.18 — Known contradiction in the single-line sweep
+### 2.18 — The single-line sweep: RESOLVED by measurement
 
-Two Flop Labs documents describe the sweep differently:
+M1 recorded this as an open contradiction. M1.1 settled it against the official
+implementation running locally (technocore-chat `9c7df0e`, v0.10.0). Full matrix
+and reproduction: [`TECHNOCORE_CONFORMANCE.md`](TECHNOCORE_CONFORMANCE.md).
 
-* the `technocore-chat` README says invisible characters (including newlines) **are converted to spaces**;
-* `/llms.txt` says control and formatting characters are **removed**.
+| # | Statement | Category | Source |
+|---|---|---|---|
+| 2.18.1 | Characters in Unicode categories `Cc`, `Cf`, `Cs`, `Co`, `Zl`, `Zp` are replaced with U+0020. | OFFICIAL OBSERVED BEHAVIOR | measured, v0.10.0; matches `src/store.py` `INVISIBLE_CATEGORIES` |
+| 2.18.2 | Category **`Zs` is NOT swept**. U+00A0, U+1680, U+2003, U+2007, U+3000 survive interior positions. | OFFICIAL OBSERVED BEHAVIOR | measured |
+| 2.18.3 | The result is then trimmed with `str.strip()`, which **does** remove `Zs` at the ends. | OFFICIAL OBSERVED BEHAVIOR | measured |
+| 2.18.4 | Interior runs of spaces are **not** collapsed. | OFFICIAL OBSERVED BEHAVIOR | measured |
+| 2.18.5 | Text empty after the sweep is refused with HTTP 400. | OFFICIAL OBSERVED BEHAVIOR | measured |
+| 2.18.6 | The README's "converted to spaces" is accurate; `/llms.txt`'s "removed" is **not** an accurate description of the implementation. Neither document mentions the trim or the `Zs` exemption. | OFFICIAL OBSERVED BEHAVIOR vs DOCUMENTED BEHAVIOR | both documents, plus measurement |
+| 2.18.7 | `Cs` and `Co` are in the official category tuple but are unreachable over UTF-8, so their handling is read from source, not measured. | UNRESOLVED (minor) | `src/store.py` |
+| 2.18.8 | That this behaviour is stable across future Technocore versions. | LOCAL ASSUMPTION | pinned to `9c7df0e` only |
 
-These are different transformations and they produce different signed bytes.
+### 2.19 — Further measured behaviour (M1.1)
 
-* **ASSUMPTION:** we implement *replace-with-space* as the default (`identity/canonical.py`, `SweepPolicy.replace_with_space=True`), because it matches the README's description of what the server stores.
-* **ASSUMPTION:** we do **not** collapse runs of spaces and do **not** trim ends, because no document says the server does either.
+| # | Statement | Category |
+|---|---|---|
+| 2.19.1 | A room read returns `seq`, `ts`, `from`, `text`, `nonce` — and **no signature**. A reader therefore cannot re-verify authorship; `from` is the service's claim, not evidence. | OFFICIAL OBSERVED BEHAVIOR |
+| 2.19.2 | A percent-encoded LF (`%0A`) in a GET write path answers `404 no route matched`. `%0D`, `%00`, `%09`, `%E2%80%A8` all pass. The same text succeeds over `POST /r/<room>`. | OFFICIAL OBSERVED BEHAVIOR |
+| 2.19.3 | A non-increasing nonce answers **HTTP 400**, not 409. | OFFICIAL OBSERVED BEHAVIOR |
+| 2.19.4 | v0.10.0 refuses cross-sender duplicate room texts with **422** inside a window (`dupe_filter_seconds`, `dupe_min_length`, `dupe_max_copies`). | OFFICIAL OBSERVED BEHAVIOR |
+| 2.19.5 | The signature covers `<room>\|<nonce>\|<swept text>` and excludes `seq`/`ts` — confirmed by two messages differing only in server-assigned fields both verifying. | OFFICIAL OBSERVED BEHAVIOR |
 
-Both are one constant away from being changed. The integration conformance test against a self-hosted instance is what will settle this; until then, treat any signature-rejection bug as a sweep-mismatch first.
+**Scope guard.** Everything in 2.18 and 2.19 is a fact about one HTTP service at
+one commit. Technocore is a satellite service, **not the FLOP protocol** (§2.1).
+None of it says anything about FLOP consensus, tokenomics, the testnet or the faucet.
 
 ## 3. FlopOffice concepts that are NOT FLOP protocol features
 

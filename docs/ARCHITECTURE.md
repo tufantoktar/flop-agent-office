@@ -48,6 +48,14 @@ canonicalisation bug this ordering exists to prevent.
 disagreement between the canonicaliser and the signer fails locally rather than
 producing a signature the server will reject.
 
+Since M1.1 the sweep is **pinned to measured official behaviour**, not to a
+reading of the documentation: replace `Cc`/`Cf`/`Cs`/`Co`/`Zl`/`Zp` with U+0020,
+then `str.strip()`; leave `Zs` alone inside; never collapse runs; refuse text that
+sweeps to empty. `SweepPolicy` still exists, but it is **not a runtime switch** --
+production signing always uses `DEFAULT_SWEEP`, and the disproven combination is
+reachable only from the conformance suite, where its job is to demonstrate that
+the official server rejects it. See `docs/TECHNOCORE_CONFORMANCE.md`.
+
 **3. Facts are appended, never amended.**
 `activities` has `BEFORE UPDATE` and `BEFORE DELETE` triggers that abort. Since
 the server-assigned `seq` arrives after the row that records the attempt, a
@@ -99,6 +107,30 @@ An attacker with write access to the file and a copy of this source can rebuild
 a consistent chain. Adding external timestamping — publishing a chain head as a
 signed Technocore note, for instance — is a later milestone, and the CLI says so
 in its own output rather than letting a `VALID` line overstate itself.
+
+## Capability-scoped signing
+
+`identity/capability.py` narrows a `Signer` to exactly two verbs --
+`sign_technocore_message` and `sign_technocore_note` -- and builds the signed
+bytes internally from validated components. There is no parameter through which
+arbitrary bytes reach the key, so orchestration code cannot be talked into
+signing an attestation, a transaction, or a challenge for some other Ed25519
+protocol. Note signing is off unless explicitly granted, because notes are what
+claim and hold `d-` rooms.
+
+The wrapped signer is held on a name-mangled attribute and never returned, and
+the wrapper is not serialisable. `root_agent_capability_signer()` raises: M1.1
+ships the interface and its tests, not the key.
+
+## What a read from Technocore can and cannot prove
+
+A room read returns no signature (measured, v0.10.0), so `verified` on an
+inbound message is **always False** and the DID is the service's claim about
+authorship rather than something we checked. `signature_returned` records which
+case applies and the author label says `server-asserted, unverified`. Only our
+own outbound writes -- where we hold the signature -- can be verified. Failing
+closed here is deliberate: a field called `verified` must never be set by
+somebody else's say-so.
 
 ## Deliberate absences
 

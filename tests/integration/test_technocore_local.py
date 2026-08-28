@@ -83,8 +83,14 @@ def test_signed_round_trip(client: TechnocoreClient, signer, ledger: Ledger, con
     assert len(messages) == 1
     message = messages[0]
     assert isinstance(message, UntrustedMessage)
-    assert message.verified is True
     assert message.did == str(signer.did)
+
+    # Technocore does not return signatures on the read path (measured against
+    # v0.10.0), so `verified` must stay False: the DID is the server's claim, not
+    # evidence we checked. We verify against the signature WE hold instead.
+    assert message.signature_returned is False
+    assert message.verified is False
+    assert "server-asserted, unverified" in message.author_label
     assert verify_message(
         str(signer.did), write.signature, ROOM, nonce,
         message.text.reveal(reason="integration test comparing round-tripped text"),
@@ -125,10 +131,11 @@ def test_signature_from_another_key_is_rejected(client: TechnocoreClient, signer
 
 # --- stale nonce and replay ------------------------------------------------
 def test_stale_nonce_is_rejected(client: TechnocoreClient, signer) -> None:
+    """v0.10.0 answers 400 for a non-increasing nonce (not 409)."""
     client.send_signed_message(build_signed_message(signer, ROOM, 5, "first"))
-    with pytest.raises(TechnocoreError, match="409"):
+    with pytest.raises(TechnocoreError, match="400"):
         client.send_signed_message(build_signed_message(signer, ROOM, 4, "stale"))
-    with pytest.raises(TechnocoreError, match="409"):
+    with pytest.raises(TechnocoreError, match="400"):
         client.send_signed_message(build_signed_message(signer, ROOM, 5, "equal"))
 
 
@@ -136,7 +143,7 @@ def test_replay_of_an_identical_signed_url_is_rejected(client, signer) -> None:
     """A captured signed GET must not work twice."""
     write = build_signed_message(signer, ROOM, 9, "replay me")
     assert client.send_signed_message(write)["ok"] is True
-    with pytest.raises(TechnocoreError, match="409"):
+    with pytest.raises(TechnocoreError, match="400"):
         client.send_signed_message(write)
 
 
@@ -239,8 +246,9 @@ def test_hostile_room_content_arrives_wrapped(client, signer, conn) -> None:
     assert isinstance(message.text, UntrustedText)
     assert hostile not in repr(message)
     assert hostile not in str(message)
-    # A valid signature does not make the content trustworthy.
-    assert message.verified is True
+    # Even a DID the server vouches for buys the content no trust at all -- and
+    # since no signature comes back, we do not even have authenticity here.
+    assert message.verified is False
     assert getattr(message, "__flopoffice_untrusted__", False) is True
 
 

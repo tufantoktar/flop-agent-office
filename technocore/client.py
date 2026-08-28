@@ -290,20 +290,27 @@ class TechnocoreClient:
 
     @staticmethod
     def _to_message(room: str, item: Any) -> UntrustedMessage:
+        """Wrap one room record.
+
+        Field names measured against technocore-chat v0.10.0: a room read returns
+        ``seq``, ``ts``, ``from`` (the DID), ``text`` and ``nonce``. It does NOT
+        return ``sig``. ``did`` is accepted as an alias so a future or self-hosted
+        variant that does return it still parses.
+        """
         if not isinstance(item, dict):
             return UntrustedMessage(room=room, seq=None, ts=None,
                                     text=UntrustedText(str(item)))
-        did = item.get("did")
+        author = item.get("from") or item.get("did")
         signature = item.get("sig") or item.get("signature")
         nonce = item.get("nonce")
         text = str(item.get("text", ""))
 
         verified = False
-        if did and signature and nonce is not None:
-            # Re-verify locally. A server flag saying "verified" is the server's
-            # claim; the signature is the evidence, and we check it ourselves.
+        if author and signature and nonce is not None:
+            # Re-verify ourselves. A server flag saying "verified" is the server's
+            # claim; the signature is the evidence, and we check it.
             try:
-                verified = verify_message(str(did), str(signature), room,
+                verified = verify_message(str(author), str(signature), room,
                                           int(nonce), text)
             except (ValueError, TypeError):
                 verified = False
@@ -313,11 +320,12 @@ class TechnocoreClient:
             seq=item.get("seq"),
             ts=item.get("ts"),
             text=UntrustedText(text),
-            did=str(did) if did else None,
+            did=str(author) if author else None,
             nick=str(item["nick"]) if item.get("nick") else None,
             signature=str(signature) if signature else None,
             nonce=int(nonce) if isinstance(nonce, (int, str)) and str(nonce).isdigit() else None,
             verified=verified,
+            signature_returned=bool(signature),
             raw=item,
         )
 

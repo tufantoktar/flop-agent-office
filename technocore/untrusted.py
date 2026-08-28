@@ -117,8 +117,17 @@ class UntrustedMessage(_Untrusted):
 
     ``seq`` and ``ts`` are assigned by the server and are NOT covered by the
     author's signature, so they are recorded but carry no cryptographic weight.
-    ``verified`` means only that a signature checked out against ``did`` -- it is
-    an authenticity flag, never an authorisation or reputation flag.
+
+    ``verified`` means we re-checked a signature ourselves and it held. It is an
+    authenticity flag, never an authorisation or reputation flag.
+
+    IMPORTANT (measured against technocore-chat v0.10.0): a room read returns
+    ``from`` and ``nonce`` but **no signature**. So on the read path ``verified``
+    is necessarily False and ``signature_returned`` is False; ``did`` then carries
+    only the author the *server asserts*, which is a claim by the service, not
+    evidence. Our own outbound writes are the one case where we hold the signature
+    and can verify. Failing closed here is deliberate: a field called "verified"
+    must never be set by someone else's say-so.
     """
 
     room: str
@@ -130,6 +139,7 @@ class UntrustedMessage(_Untrusted):
     signature: str | None = None
     nonce: int | None = None
     verified: bool = False
+    signature_returned: bool = False
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -138,6 +148,11 @@ class UntrustedMessage(_Untrusted):
         if self.did and self.verified:
             body = self.did.removeprefix("did:key:")
             return f"<{body[:4]}...{body[-4:]}>"
+        if self.did:
+            # The server says this DID wrote it, but returned no signature for us
+            # to check. Label it as the claim it is.
+            body = self.did.removeprefix("did:key:")
+            return f"<{body[:4]}...{body[-4:]} server-asserted, unverified>"
         if self.nick:
             return "<~unverified>"
         return "<anonymous>"

@@ -12,6 +12,7 @@ import pytest
 
 from identity.canonical import (
     CanonicalisationError,
+    require_non_empty,
     SweepPolicy,
     UntrustedInputError,
     decode_path_segment,
@@ -196,7 +197,7 @@ def test_payload_binds_every_field(signer: EphemeralSigner) -> None:
     for variant in (
         message_payload("lobby2", 5, "text"),
         message_payload("lobby", 6, "text"),
-        message_payload("lobby", 5, "text "),
+        message_payload("lobby", 5, "text!"),
     ):
         assert verify(str(signer.did), signature, variant) is False
 
@@ -246,7 +247,7 @@ def test_single_line_sweep_replaces_invisibles_with_space() -> None:
     assert single_line_sweep("a\r\nb") == "a  b"
     assert single_line_sweep("a\tb") == "a b"
     assert single_line_sweep("a\u200bb") == "a b"    # zero width space (Cf)
-    assert single_line_sweep("a\u00a0b") == "a b"    # nbsp (Zs, not U+0020)
+    assert single_line_sweep("a\u00a0b") == "a\u00a0b"  # nbsp (Zs) is NOT swept
     assert single_line_sweep("a\u2028b") == "a b"    # line separator (Zl)
     assert single_line_sweep("a\x00b") == "a b"      # NUL (Cc)
     assert single_line_sweep("normal text") == "normal text"
@@ -259,14 +260,38 @@ def test_single_line_sweep_is_idempotent() -> None:
     assert "\n" not in once and "\u200b" not in once
 
 
-def test_sweep_does_not_collapse_or_trim_by_default() -> None:
-    # No Flop Labs document states that runs collapse or ends are trimmed, so we
-    # must not do either -- guessing changes the signed bytes.
+def test_sweep_does_not_collapse_runs() -> None:
+    """Confirmed against technocore-chat v0.10.0: interior runs are preserved."""
     assert single_line_sweep("a\n\n\nb") == "a   b"
-    assert single_line_sweep("  padded  ") == "  padded  "
+    assert single_line_sweep("AA \t\t BB") == "AA    BB"
 
 
-def test_alternative_sweep_policy_is_available() -> None:
+def test_sweep_trims_the_ends() -> None:
+    """Confirmed against v0.10.0: store.clean_text ends with str.strip().
+
+    M1 did not trim, which would have made every message with leading or trailing
+    whitespace fail signature verification server-side.
+    """
+    assert single_line_sweep("  padded  ") == "padded"
+    assert single_line_sweep("\npadded\n") == "padded"
+    # str.strip() removes Zs at the ends even though the sweep keeps them inside.
+    assert single_line_sweep("\u00a0padded\u3000") == "padded"
+
+
+def test_zs_characters_survive_interior_positions() -> None:
+    """The single most likely place to get this wrong -- M1 did."""
+    for cp in ("\u00a0", "\u2003", "\u1680", "\u2007", "\u3000"):
+        assert single_line_sweep(f"AA{cp}BB") == f"AA{cp}BB"
+
+
+def test_empty_after_sweep_is_refused_locally() -> None:
+    """The server answers 400; refusing here saves a nonce and a round trip."""
+    with pytest.raises(CanonicalisationError, match="visible"):
+        require_non_empty(single_line_sweep("\u200b\u200c\u200d"))
+
+
+def test_the_disproven_policy_is_still_expressible_for_conformance_evidence() -> None:
+    """Not a runtime switch -- the conformance suite uses it to show 403s."""
     removing = SweepPolicy(replace_with_space=False)
     assert single_line_sweep("a\nb", removing) == "ab"
 

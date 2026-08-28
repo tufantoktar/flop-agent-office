@@ -31,5 +31,6 @@ pythonpath = ["."]
 addopts = "-q --strict-markers"
 markers = [
     "integration: requires a locally reachable Technocore instance",
+    "conformance: runs against a LOCAL official technocore-chat instance (TECHNOCORE_OFFICIAL_URL)",
 ]
 filterwarnings = ["error::DeprecationWarning"]

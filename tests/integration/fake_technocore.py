@@ -65,21 +65,16 @@ def _b64url_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "==")
 
 
+# technocore-chat v0.10.0 store.INVISIBLE_CATEGORIES, verified empirically in M1.1.
+# Zs is deliberately absent -- the official sweep keeps NBSP and friends.
+INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+
+
 def single_line_sweep(text: str) -> str:
-    """The server's sweep: invisible characters become U+0020."""
-    out = []
-    for char in text:
-        if char == " ":
-            out.append(char)
-            continue
-        category = unicodedata.category(char)
-        if category in {"Cc", "Cf", "Zl", "Zp", "Cs", "Co"} or (
-            category == "Zs" and char != " "
-        ):
-            out.append(" ")
-        else:
-            out.append(char)
-    return "".join(out)
+    """Mirror of the official ``store.clean_text``: sweep to spaces, then strip."""
+    return "".join(
+        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+    ).strip()
 
 
 class FakeTechnocoreState:
@@ -184,18 +179,20 @@ class _Handler(BaseHTTPRequestHandler):
             key = (did, room)
             last = self.state.nonces.get(key, 0)
             if nonce <= last:
-                self._send(409, {"error": "nonce must exceed last used",
+                # v0.10.0 answers 400 here, not 409. Mirroring the real code
+                # matters: the double taught us 409 and the test believed it.
+                self._send(400, {"error": f"nonce {nonce} is not greater than {last}",
                                  "last_nonce": last})
                 return
             self.state.nonces[key] = nonce
 
             seq = self.state.next_seq
             self.state.next_seq += 1
+            # Mirrors v0.10.0's stored record exactly: `from`, and NO signature.
             self.state.rooms.setdefault(room, []).append({
                 "seq": seq,
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "did": did,
-                "sig": sig,
+                "from": did,
                 "nonce": nonce,
                 "text": swept,
             })

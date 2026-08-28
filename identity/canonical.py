@@ -11,18 +11,29 @@ A canonicalisation bug is the most dangerous class of bug in this layer: it
 produces signatures that verify locally and are rejected (or, worse, mis-bound)
 server-side. Everything here is therefore explicit, pure, and heavily tested.
 
-KNOWN AMBIGUITY -- see docs/FLOP_FACTS.md
------------------------------------------
-Two Flop Labs documents describe the sweep differently:
+PINNED AGAINST THE OFFICIAL IMPLEMENTATION
+------------------------------------------
+The two Flop Labs documents describe the sweep differently (README: invisible
+characters "converted to spaces"; llms.txt: "removed"). M1.1 settled it against
+technocore-chat v0.10.0 (commit 9c7df0e) running locally -- see
+docs/TECHNOCORE_CONFORMANCE.md for the matrix and the reproduction command.
 
-* the technocore-chat README says invisible characters "are converted to spaces"
-* ``/llms.txt`` says control and formatting characters are "removed"
+Observed behaviour, which this module now reproduces exactly:
 
-Those are not the same transformation. We implement the *replace-with-space*
-reading as the default (it matches the README's description of stored text) and
-expose the choice as an explicit :class:`SweepPolicy` so a single constant
-changes it once the behaviour is pinned against a real server. The conformance
-test in ``tests/integration`` is what will settle it -- not this docstring.
+* every character whose Unicode general category is Cc, Cf, Cs, Co, Zl or Zp is
+  replaced with U+0020 -- the README reading is correct, "removed" is not;
+* category **Zs is NOT swept**. U+00A0, U+2003, U+1680, U+2007 and U+3000 all
+  survive interior positions unchanged. M1 wrongly swept them;
+* the result is then **trimmed** with Python ``str.strip()`` semantics, which do
+  remove Zs (and every other ``str.isspace()`` character) at the ends. M1 did not
+  trim at all;
+* runs are **not** collapsed: "AA \t\t BB" stores as "AA" + four spaces + "BB";
+* text that is empty after the sweep is refused by the server (HTTP 400), so it is
+  refused here too rather than sent.
+
+The server verifies the signature over ``clean_text(received_text)``. Our client
+therefore sweeps once, signs the swept form, and transmits that same swept form --
+which is a fixed point of the server's sweep, so its re-sweep is a no-op.
 """
 
 from __future__ import annotations
@@ -38,6 +49,7 @@ __all__ = [
     "SweepPolicy",
     "DEFAULT_SWEEP",
     "single_line_sweep",
+    "require_non_empty",
     "validate_room",
     "validate_nonce",
     "message_payload",
@@ -55,10 +67,15 @@ MAX_NONCE_DIGITS = 19
 
 _SPACE = " "
 
-# Unicode general categories treated as "invisible" by the sweep.
-#   Cc control, Cf format, Zl line separator, Zp paragraph separator,
-#   Zs space separators other than U+0020, Cs surrogate, Co private use
-_SWEEP_CATEGORIES = {"Cc", "Cf", "Zl", "Zp", "Cs", "Co"}
+# Unicode general categories the official implementation replaces with a space.
+# This is technocore-chat's own INVISIBLE_CATEGORIES tuple, verified empirically:
+#   Cc control      Cf format       Cs surrogate
+#   Co private use  Zl line sep     Zp paragraph sep
+#
+# Zs (U+00A0, U+2003, U+1680, U+2007, U+3000, ...) is deliberately ABSENT: the
+# server keeps those characters in interior positions. M1 swept them and would
+# have produced signatures the server rejects.
+_SWEEP_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
 
 
 class CanonicalisationError(ValueError):
@@ -85,27 +102,40 @@ def _reject_untrusted(value: Any, *, where: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class SweepPolicy:
-    """How the single-line sweep normalises text.
+    """The sweep's parameters, pinned to observed official behaviour.
+
+    This is NOT a runtime switch. Production signing always uses
+    :data:`DEFAULT_SWEEP`; there is exactly one deterministic signing behaviour.
+    The non-default combination exists so the conformance suite can demonstrate
+    that the rejected reading really is rejected by the official server -- it is
+    evidence, not a configuration option.
 
     replace_with_space:
-        True  -> invisible characters become U+0020 (README reading, default)
-        False -> invisible characters are deleted (llms.txt reading)
-    collapse_runs / strip_ends:
-        Both default False. No Flop Labs document states that runs are collapsed
-        or that ends are trimmed, so we do neither. Do not enable either without
-        evidence from a live server -- guessing here silently breaks signatures.
+        True  -> invisible characters become U+0020. CONFIRMED against v0.10.0.
+        False -> invisible characters are deleted. DISPROVEN: 15 of 15
+                 discriminating cases were rejected 403 under this reading.
+    trim_ends:
+        True  -> Python ``str.strip()`` after sweeping. CONFIRMED.
+    collapse_runs:
+        False -> runs of spaces are preserved. CONFIRMED.
     """
 
     replace_with_space: bool = True
+    trim_ends: bool = True
     collapse_runs: bool = False
-    strip_ends: bool = False
 
 
 DEFAULT_SWEEP = SweepPolicy()
 
 
-def single_line_sweep(text: str, policy: SweepPolicy = DEFAULT_SWEEP) -> str:
-    """Apply the single-line sweep. Pure; total; never raises on valid str."""
+def single_line_sweep(text: str, policy: SweepPolicy = None) -> str:  # type: ignore[assignment]
+    """Reproduce technocore-chat's ``store.clean_text`` sweep, minus its length check.
+
+    Sweep, then trim. Pure and total for any ``str``; raises only when the result
+    is empty, which the official server also refuses.
+    """
+    if policy is None:
+        policy = DEFAULT_SWEEP
     # Taint check first: an untrusted wrapper is also not a str, and reporting
     # "must be a str" would hide the real reason it was refused.
     _reject_untrusted(text, where="single_line_sweep")
@@ -114,25 +144,36 @@ def single_line_sweep(text: str, policy: SweepPolicy = DEFAULT_SWEEP) -> str:
 
     out: list[str] = []
     for char in text:
-        if char == _SPACE:
+        if unicodedata.category(char) in _SWEEP_CATEGORIES:
+            if policy.replace_with_space:
+                out.append(_SPACE)
+            # else: dropped (the disproven reading; conformance evidence only)
+        else:
             out.append(char)
-            continue
-        category = unicodedata.category(char)
-        invisible = category in _SWEEP_CATEGORIES or (
-            category == "Zs" and char != _SPACE
-        )
-        if not invisible:
-            out.append(char)
-        elif policy.replace_with_space:
-            out.append(_SPACE)
-        # else: dropped
 
     result = "".join(out)
     if policy.collapse_runs:
         result = _SPACE.join(part for part in result.split(_SPACE) if part)
-    if policy.strip_ends:
-        result = result.strip(_SPACE)
+    if policy.trim_ends:
+        # Python str.strip() semantics, matching the official implementation:
+        # this DOES remove Zs characters at the ends even though the sweep above
+        # leaves them alone in interior positions.
+        result = result.strip()
     return result
+
+
+def require_non_empty(swept: str) -> str:
+    """Refuse text the server would reject as empty-after-sweep (its HTTP 400).
+
+    Failing here costs a local exception; failing at the server costs a wasted
+    nonce and a round trip.
+    """
+    if not swept:
+        raise CanonicalisationError(
+            "nothing visible survives the single-line sweep; the server refuses "
+            "this with HTTP 400. Send at least one visible character."
+        )
+    return swept
 
 
 def validate_room(room: str) -> str:
@@ -192,7 +233,7 @@ def message_payload(
     if not isinstance(text, str):
         raise CanonicalisationError("text must be a str")
 
-    swept = text if already_swept else single_line_sweep(text, policy)
+    swept = require_non_empty(text if already_swept else single_line_sweep(text, policy))
     if len(swept) > MAX_MESSAGE_CHARS:
         raise CanonicalisationError(
             f"message is {len(swept)} chars, server limit is {MAX_MESSAGE_CHARS}"
@@ -221,7 +262,7 @@ def note_payload(
             raise CanonicalisationError(f"{name} must not contain '|'")
     nonce = validate_nonce(nonce)
 
-    swept = value if already_swept else single_line_sweep(value, policy)
+    swept = require_non_empty(value if already_swept else single_line_sweep(value, policy))
     encoded = f"{namespace}|{key}|{nonce}|{swept}".encode("utf-8")
     if len(swept.encode("utf-8")) > MAX_NOTE_BYTES:
         raise CanonicalisationError(
